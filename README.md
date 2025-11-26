@@ -75,7 +75,7 @@ Every piece of data stored on the current Autonomi network has metadata (signatu
 | **Eclipse Protection** | Limited | Diversity scoring, ASN limits, detection algorithms |
 | **Auto-Upgrade** | Manual | Cross-platform staged rollout with network protection |
 | **Rate Limiting** | Basic | 100 req/min per node, 500/min per IP |
-| **Node Identity** | IP-based | SHA256(IP + PublicKey + Salt) binding |
+| **Node Identity** | Ed25519 pubkey (unused, never signs data) | ML-DSA-65 pubkey (actively signs all operations) |
 | **Legacy Data** | N/A | Full support for classical encrypted data |
 
 ---
