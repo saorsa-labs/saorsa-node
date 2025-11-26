@@ -56,7 +56,7 @@ ant-node uses:
 - **Ed25519 signatures** - Quantum vulnerable (elliptic curve based)
 - **X25519 key exchange** - Quantum vulnerable (elliptic curve based)
 
-Every piece of data stored on the current Autonomi network has metadata (signatures, encrypted keys) that will be compromised by quantum computers. **The time to act is now.**
+Even though the Autonomi nettwork self encrypted data is secure, he Autonomi network has metadata (signatures, encrypted keys) that will be compromised by quantum computers. **The time to act is now.**
 
 ---
 
