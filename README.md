@@ -570,7 +570,7 @@ Total:                  188 tests
 
 | Type | Size Limit | Addressing | Mutability | Use Cases |
 |------|------------|------------|------------|-----------|
-| **Chunk** | 1 MB | Content-addressed (SHA256) | Immutable | Files, documents, media |
+| **Chunk** | 4 MB | Content-addressed (SHA256) | Immutable | Files, documents, media |
 | **Scratchpad** | 4 MB | Owner public key | Mutable (CRDT counter) | User profiles, settings |
 | **Pointer** | 32 bytes | Owner public key | Mutable (counter) | Mutable references, DNS-like |
 | **GraphEntry** | 100 KB | Content + owner + parents | Immutable | Version control, social feeds |
