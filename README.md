@@ -795,14 +795,23 @@ cargo build --release
 ./target/release/saorsa-node
 ```
 
-### Join Existing Network
+### Join Testnet
 
 ```bash
-# Connect to bootstrap peers
+# Connect to testnet bootstrap nodes
+./target/release/saorsa-node --testnet
+
+# Or specify bootstrap peers manually
 ./target/release/saorsa-node \
-    --bootstrap "/ip4/1.2.3.4/udp/12000/quic-v1" \
-    --bootstrap "/ip6/2001:db8::1/udp/12000/quic-v1"
+    --bootstrap "/ip4/165.22.4.178/udp/12000/quic-v1" \
+    --bootstrap "/ip4/164.92.111.156/udp/12000/quic-v1"
 ```
+
+**Testnet Bootstrap Nodes:**
+| Node | Location | Address |
+|------|----------|---------|
+| saorsa-bootstrap-1 | NYC (DigitalOcean) | `165.22.4.178:12000` |
+| saorsa-bootstrap-2 | SFO (DigitalOcean) | `164.92.111.156:12000` |
 
 ### Full Configuration
 
@@ -896,8 +905,8 @@ port = 0  # Auto-select
 [network]
 ip_version = "dual"
 bootstrap = [
-    "/ip4/1.2.3.4/udp/12000/quic-v1",
-    "/ip6/2001:db8::1/udp/12000/quic-v1"
+    "/ip4/165.22.4.178/udp/12000/quic-v1",
+    "/ip4/164.92.111.156/udp/12000/quic-v1"
 ]
 
 [upgrade]
