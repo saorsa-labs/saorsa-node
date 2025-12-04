@@ -451,7 +451,11 @@ fn build_platform_patterns(arch: &str, os: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::case_sensitive_file_extension_comparisons
+)]
 mod tests {
     use super::*;
 
@@ -592,8 +596,9 @@ mod tests {
         // Should not be a .sig file
         assert!(!asset.name.to_lowercase().ends_with(".sig"));
         // Should be an archive
+        let lower = asset.name.to_lowercase();
         assert!(
-            asset.name.ends_with(".tar.gz") || asset.name.ends_with(".zip"),
+            lower.ends_with(".tar.gz") || lower.ends_with(".zip"),
             "Should be an archive format"
         );
     }
