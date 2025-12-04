@@ -14,7 +14,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use clap::{Parser, Subcommand};
-use saorsa_pqc::api::sig::{ml_dsa_65, MlDsaPublicKey, MlDsaSecretKey, MlDsaSignature, MlDsaVariant};
+use saorsa_pqc::api::sig::{
+    ml_dsa_65, MlDsaPublicKey, MlDsaSecretKey, MlDsaSignature, MlDsaVariant,
+};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
