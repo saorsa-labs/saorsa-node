@@ -169,7 +169,7 @@ pub fn extract_nonce(data: &[u8]) -> Result<(&[u8], &[u8])> {
 ///
 /// # Arguments
 ///
-/// * `data` - The encrypted record with embedded nonce [nonce][ciphertext+tag]
+/// * `data` - The encrypted record with embedded nonce: `[nonce][ciphertext+tag]`
 /// * `key` - The 256-bit decryption key
 ///
 /// # Errors
