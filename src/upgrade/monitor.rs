@@ -379,7 +379,10 @@ pub fn find_platform_asset(assets: &[Asset]) -> Option<&Asset> {
     None
 }
 
-/// Check if an asset name represents a binary (not a signature or other artifact).
+/// Check if an asset name represents a downloadable binary or archive.
+///
+/// This includes direct executables, as well as archive formats (`.tar.gz`, `.zip`)
+/// that contain binaries.
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn is_binary_asset(name: &str) -> bool {
     let lower = name.to_lowercase();
@@ -390,14 +393,21 @@ fn is_binary_asset(name: &str) -> bool {
         || lower.ends_with(".md5")
         || lower.ends_with(".txt")
         || lower.ends_with(".md")
+        || lower.ends_with(".deb")
+        || lower.ends_with(".rpm")
+        || lower.ends_with(".msi")
     {
         return false;
     }
 
-    // On Windows, prefer .exe files
+    // Accept archive formats on all platforms
+    if lower.ends_with(".tar.gz") || lower.ends_with(".zip") {
+        return true;
+    }
+
+    // On Windows, prefer .exe files for direct binary downloads
     #[cfg(windows)]
     if !lower.ends_with(".exe") {
-        // On Windows, only consider .exe files as binaries
         return false;
     }
 
@@ -548,22 +558,31 @@ mod tests {
     /// Test 9: Find correct asset for platform
     #[test]
     fn test_find_platform_asset() {
+        // Test with archive format (CLI releases)
         let assets = vec![
             Asset {
-                name: "saorsa-node-x86_64-unknown-linux-gnu".to_string(),
+                name: "saorsa-node-cli-linux-x64.tar.gz".to_string(),
                 browser_download_url: "https://example.com/linux".to_string(),
             },
             Asset {
-                name: "saorsa-node-x86_64-unknown-linux-gnu.sig".to_string(),
+                name: "saorsa-node-cli-linux-x64.tar.gz.sig".to_string(),
                 browser_download_url: "https://example.com/linux.sig".to_string(),
             },
             Asset {
-                name: "saorsa-node-aarch64-apple-darwin".to_string(),
+                name: "saorsa-node-cli-macos-arm64.tar.gz".to_string(),
                 browser_download_url: "https://example.com/macos".to_string(),
             },
             Asset {
-                name: "saorsa-node-aarch64-apple-darwin.sig".to_string(),
+                name: "saorsa-node-cli-macos-arm64.tar.gz.sig".to_string(),
                 browser_download_url: "https://example.com/macos.sig".to_string(),
+            },
+            Asset {
+                name: "saorsa-node-cli-windows-x64.zip".to_string(),
+                browser_download_url: "https://example.com/windows".to_string(),
+            },
+            Asset {
+                name: "saorsa-node-cli-windows-x64.zip.sig".to_string(),
+                browser_download_url: "https://example.com/windows.sig".to_string(),
             },
         ];
 
@@ -572,14 +591,20 @@ mod tests {
         let asset = asset.unwrap();
         // Should not be a .sig file
         assert!(!asset.name.to_lowercase().ends_with(".sig"));
+        // Should be an archive
+        assert!(
+            asset.name.ends_with(".tar.gz") || asset.name.ends_with(".zip"),
+            "Should be an archive format"
+        );
     }
 
-    /// Test: `is_binary_asset` correctly identifies binaries
+    /// Test: `is_binary_asset` correctly identifies binaries and archives
     #[test]
     fn test_is_binary_asset() {
-        // Binary files should be identified
-        assert!(is_binary_asset("saorsa-node-x86_64-linux"));
-        assert!(is_binary_asset("saorsa-node-aarch64-darwin"));
+        // Archive formats should be identified (CLI releases)
+        assert!(is_binary_asset("saorsa-node-cli-linux-x64.tar.gz"));
+        assert!(is_binary_asset("saorsa-node-cli-macos-arm64.tar.gz"));
+        assert!(is_binary_asset("saorsa-node-cli-windows-x64.zip"));
 
         // Signature and metadata files should be excluded
         assert!(!is_binary_asset("saorsa-node.sig"));
@@ -587,6 +612,11 @@ mod tests {
         assert!(!is_binary_asset("saorsa-node.md5"));
         assert!(!is_binary_asset("RELEASE_NOTES.txt"));
         assert!(!is_binary_asset("README.md"));
+
+        // Installer packages should be excluded (handled separately)
+        assert!(!is_binary_asset("saorsa-node.deb"));
+        assert!(!is_binary_asset("saorsa-node.rpm"));
+        assert!(!is_binary_asset("saorsa-node.msi"));
     }
 
     /// Test 10: Monitor check interval
@@ -609,6 +639,20 @@ mod tests {
             Version::new(1, 0, 0),
         );
 
+        // Build platform-specific archive name using friendly naming
+        let (friendly_os, archive_ext) = match std::env::consts::OS {
+            "linux" => ("linux", "tar.gz"),
+            "macos" => ("macos", "tar.gz"),
+            "windows" => ("windows", "zip"),
+            _ => ("unknown", "tar.gz"),
+        };
+        let friendly_arch = match std::env::consts::ARCH {
+            "x86_64" => "x64",
+            "aarch64" => "arm64",
+            _ => std::env::consts::ARCH,
+        };
+        let archive_name = format!("saorsa-node-cli-{friendly_os}-{friendly_arch}.{archive_ext}");
+
         let release = GitHubRelease {
             tag_name: "v1.1.0".to_string(),
             name: "Release 1.1.0".to_string(),
@@ -616,19 +660,11 @@ mod tests {
             prerelease: false,
             assets: vec![
                 Asset {
-                    name: format!(
-                        "saorsa-node-{}-{}",
-                        std::env::consts::ARCH,
-                        std::env::consts::OS
-                    ),
+                    name: archive_name.clone(),
                     browser_download_url: "https://example.com/binary".to_string(),
                 },
                 Asset {
-                    name: format!(
-                        "saorsa-node-{}-{}.sig",
-                        std::env::consts::ARCH,
-                        std::env::consts::OS
-                    ),
+                    name: format!("{archive_name}.sig"),
                     browser_download_url: "https://example.com/binary.sig".to_string(),
                 },
             ],
