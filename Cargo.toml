@@ -29,9 +29,9 @@ saorsa-core = "0.7.1"
 saorsa-pqc = "0.3.12"
 
 # Payment verification - autonomi network lookup + EVM payment
-autonomi = { path = "../autonomi/autonomi" }
-ant-evm = { path = "../autonomi/ant-evm" }
-evmlib = { path = "../autonomi/evmlib" }
+autonomi = "0.7"
+ant-evm = "0.1"
+evmlib = "0.4"
 
 # Caching - LRU cache for verified XorNames
 lru = "0.12"
