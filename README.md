@@ -803,8 +803,8 @@ cargo build --release
 
 # Or specify bootstrap peers manually
 ./target/release/saorsa-node \
-    --bootstrap "/ip4/165.22.4.178/udp/12000/quic-v1" \
-    --bootstrap "/ip4/164.92.111.156/udp/12000/quic-v1"
+    --bootstrap "165.22.4.178:12000" \
+    --bootstrap "164.92.111.156:12000"
 ```
 
 **Testnet Bootstrap Nodes:**
