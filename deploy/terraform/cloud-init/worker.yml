@@ -1,0 +1,171 @@
+#cloud-config
+# Saorsa Worker Node - Runs ${nodes_per_worker} nodes
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - jq
+  - htop
+  - iotop
+
+write_files:
+  - path: /etc/saorsa/config.env
+    permissions: '0644'
+    content: |
+      REGION=${region}
+      NODES_PER_WORKER=${nodes_per_worker}
+      METRICS_BASE_PORT=${metrics_base_port}
+      SAORSA_VERSION=${saorsa_version}
+      BOOTSTRAP_NODES=${bootstrap_nodes}
+
+  - path: /usr/local/bin/spawn-saorsa-nodes.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      source /etc/saorsa/config.env
+
+      BINARY_URL="https://github.com/dirvine/saorsa-node/releases/download/v$${SAORSA_VERSION}/saorsa-node-linux-amd64"
+      BINARY_PATH="/usr/local/bin/saorsa-node"
+
+      echo "Downloading saorsa-node v$${SAORSA_VERSION}..."
+      curl -L -o "$${BINARY_PATH}" "$${BINARY_URL}"
+      chmod +x "$${BINARY_PATH}"
+
+      # Parse bootstrap nodes
+      IFS=',' read -ra BOOTSTRAPS <<< "$${BOOTSTRAP_NODES}"
+      BOOTSTRAP_ARGS=""
+      for bs in "$${BOOTSTRAPS[@]}"; do
+        BOOTSTRAP_ARGS="$${BOOTSTRAP_ARGS} --bootstrap $${bs}"
+      done
+
+      echo "Spawning $${NODES_PER_WORKER} nodes..."
+
+      for i in $(seq 0 $(($${NODES_PER_WORKER} - 1))); do
+        NODE_DIR="/var/lib/saorsa/nodes/node-$${i}"
+        METRICS_PORT=$(($${METRICS_BASE_PORT} + $${i}))
+        SERVICE_NAME="saorsa-node-$${i}"
+
+        mkdir -p "$${NODE_DIR}"
+
+        # Create systemd service
+        cat > /etc/systemd/system/$${SERVICE_NAME}.service <<EOF
+      [Unit]
+      Description=Saorsa Node $${i} (Region: $${REGION})
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=saorsa
+      Group=saorsa
+      ExecStart=$${BINARY_PATH} --root-dir $${NODE_DIR} --port 0 --metrics-port $${METRICS_PORT} $${BOOTSTRAP_ARGS}
+      Restart=always
+      RestartSec=10
+      MemoryMax=350M
+      CPUQuota=15%
+
+      # Security hardening
+      NoNewPrivileges=true
+      ProtectSystem=strict
+      ProtectHome=true
+      ReadWritePaths=$${NODE_DIR}
+      PrivateTmp=true
+
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+
+        systemctl daemon-reload
+        systemctl enable "$${SERVICE_NAME}"
+        systemctl start "$${SERVICE_NAME}"
+
+        echo "Started node $${i} on metrics port $${METRICS_PORT}"
+
+        # Stagger starts to avoid overwhelming bootstrap nodes
+        sleep 0.5
+      done
+
+      echo "All $${NODES_PER_WORKER} nodes started successfully"
+
+  - path: /usr/local/bin/manage-saorsa-nodes.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      source /etc/saorsa/config.env
+
+      ACTION="$${1:-status}"
+
+      case "$${ACTION}" in
+        start)
+          for i in $(seq 0 $(($${NODES_PER_WORKER} - 1))); do
+            systemctl start "saorsa-node-$${i}" || true
+          done
+          echo "Started all nodes"
+          ;;
+        stop)
+          for i in $(seq 0 $(($${NODES_PER_WORKER} - 1))); do
+            systemctl stop "saorsa-node-$${i}" || true
+          done
+          echo "Stopped all nodes"
+          ;;
+        restart)
+          for i in $(seq 0 $(($${NODES_PER_WORKER} - 1))); do
+            systemctl restart "saorsa-node-$${i}" || true
+            sleep 0.2
+          done
+          echo "Restarted all nodes"
+          ;;
+        status)
+          RUNNING=0
+          FAILED=0
+          for i in $(seq 0 $(($${NODES_PER_WORKER} - 1))); do
+            if systemctl is-active --quiet "saorsa-node-$${i}"; then
+              ((RUNNING++)) || true
+            else
+              ((FAILED++)) || true
+              echo "Node $${i}: FAILED"
+            fi
+          done
+          echo "---"
+          echo "Running: $${RUNNING}/$${NODES_PER_WORKER}"
+          echo "Failed: $${FAILED}/$${NODES_PER_WORKER}"
+          ;;
+        health)
+          for i in $(seq 0 $(($${NODES_PER_WORKER} - 1))); do
+            PORT=$(($${METRICS_BASE_PORT} + $${i}))
+            HEALTH=$(curl -s "http://localhost:$${PORT}/metrics" | grep -E "^p2p_health_status" | awk '{print $2}' || echo "0")
+            if [[ "$${HEALTH}" != "1" ]]; then
+              echo "Node $${i} (port $${PORT}): unhealthy"
+            fi
+          done
+          ;;
+        *)
+          echo "Usage: $0 {start|stop|restart|status|health}"
+          exit 1
+          ;;
+      esac
+
+runcmd:
+  # Create saorsa user
+  - useradd -r -s /bin/false saorsa || true
+
+  # Create data directories
+  - mkdir -p /var/lib/saorsa/nodes
+  - chown -R saorsa:saorsa /var/lib/saorsa
+
+  # Increase file limits
+  - echo "* soft nofile 65535" >> /etc/security/limits.conf
+  - echo "* hard nofile 65535" >> /etc/security/limits.conf
+  - echo "fs.file-max = 2097152" >> /etc/sysctl.conf
+  - sysctl -p
+
+  # Start nodes
+  - /usr/local/bin/spawn-saorsa-nodes.sh
+
+final_message: "Saorsa worker node ready with ${nodes_per_worker} nodes in region ${region}"

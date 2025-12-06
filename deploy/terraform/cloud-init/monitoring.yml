@@ -1,0 +1,219 @@
+#cloud-config
+# Saorsa Monitoring Server - Prometheus + Grafana
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - jq
+  - htop
+  - docker.io
+  - docker-compose
+
+write_files:
+  - path: /etc/saorsa/workers.json
+    permissions: '0644'
+    content: |
+      ${worker_ips}
+
+  - path: /opt/monitoring/docker-compose.yml
+    permissions: '0644'
+    content: |
+      version: '3.8'
+
+      services:
+        prometheus:
+          image: prom/prometheus:v2.48.0
+          container_name: prometheus
+          ports:
+            - "9090:9090"
+          volumes:
+            - ./prometheus:/etc/prometheus
+            - prometheus_data:/prometheus
+          command:
+            - '--config.file=/etc/prometheus/prometheus.yml'
+            - '--storage.tsdb.path=/prometheus'
+            - '--storage.tsdb.retention.time=30d'
+            - '--web.enable-lifecycle'
+          restart: always
+
+        grafana:
+          image: grafana/grafana:10.2.2
+          container_name: grafana
+          ports:
+            - "3000:3000"
+          volumes:
+            - ./grafana/provisioning:/etc/grafana/provisioning
+            - ./grafana/dashboards:/var/lib/grafana/dashboards
+            - grafana_data:/var/lib/grafana
+          environment:
+            - GF_SECURITY_ADMIN_PASSWORD=saorsa-testnet
+            - GF_USERS_ALLOW_SIGN_UP=false
+            - GF_INSTALL_PLUGINS=grafana-piechart-panel
+          restart: always
+          depends_on:
+            - prometheus
+
+      volumes:
+        prometheus_data:
+        grafana_data:
+
+  - path: /opt/monitoring/prometheus/prometheus.yml
+    permissions: '0644'
+    content: |
+      global:
+        scrape_interval: 15s
+        evaluation_interval: 15s
+
+      alerting:
+        alertmanagers:
+          - static_configs:
+              - targets: []
+
+      rule_files:
+        - /etc/prometheus/rules/*.yml
+
+      scrape_configs:
+        - job_name: 'prometheus'
+          static_configs:
+            - targets: ['localhost:9090']
+
+        # Worker nodes - dynamically generated
+        # WORKER_SCRAPE_CONFIGS_PLACEHOLDER
+
+  - path: /opt/monitoring/prometheus/rules/saorsa-alerts.yml
+    permissions: '0644'
+    content: |
+      groups:
+        - name: saorsa-alerts
+          rules:
+            - alert: NodeDown
+              expr: up == 0
+              for: 2m
+              labels:
+                severity: critical
+              annotations:
+                summary: "Saorsa node down"
+                description: "Node {{ $labels.instance }} has been down for more than 2 minutes"
+
+            - alert: LowPeerCount
+              expr: p2p_network_peer_count < 3
+              for: 5m
+              labels:
+                severity: warning
+              annotations:
+                summary: "Low peer count"
+                description: "Node {{ $labels.instance }} has less than 3 peers"
+
+            - alert: UnhealthyNode
+              expr: p2p_health_status == 0
+              for: 5m
+              labels:
+                severity: warning
+              annotations:
+                summary: "Unhealthy node"
+                description: "Node {{ $labels.instance }} is reporting unhealthy status"
+
+            - alert: HighMemoryUsage
+              expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.9
+              for: 5m
+              labels:
+                severity: warning
+              annotations:
+                summary: "High memory usage"
+                description: "Memory usage is above 90% on {{ $labels.instance }}"
+
+  - path: /opt/monitoring/grafana/provisioning/datasources/datasources.yml
+    permissions: '0644'
+    content: |
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          type: prometheus
+          access: proxy
+          url: http://prometheus:9090
+          isDefault: true
+          editable: false
+
+  - path: /opt/monitoring/grafana/provisioning/dashboards/dashboards.yml
+    permissions: '0644'
+    content: |
+      apiVersion: 1
+      providers:
+        - name: 'Saorsa Testnet'
+          orgId: 1
+          folder: ''
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards
+
+  - path: /usr/local/bin/generate-prometheus-config.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      WORKERS_JSON="/etc/saorsa/workers.json"
+      PROMETHEUS_CONFIG="/opt/monitoring/prometheus/prometheus.yml"
+      NODES_PER_WORKER=${nodes_per_worker}
+      METRICS_BASE_PORT=${metrics_base_port}
+
+      # Read worker IPs
+      WORKER_IPS=$(cat "$WORKERS_JSON")
+
+      # Generate scrape configs
+      SCRAPE_CONFIGS=""
+
+      for ip in $(echo "$WORKER_IPS" | jq -r '.[]'); do
+        REGION=$(echo "$ip" | cut -d'.' -f1-2 | sed 's/\./-/g')
+
+        TARGETS=""
+        for i in $(seq 0 $(($NODES_PER_WORKER - 1))); do
+          PORT=$(($METRICS_BASE_PORT + $i))
+          if [[ -n "$TARGETS" ]]; then
+            TARGETS="$TARGETS, "
+          fi
+          TARGETS="$TARGETS'$ip:$PORT'"
+        done
+
+        SCRAPE_CONFIGS="$SCRAPE_CONFIGS
+        - job_name: 'saorsa-worker-$ip'
+          static_configs:
+            - targets: [$TARGETS]
+              labels:
+                worker: '$ip'
+      "
+      done
+
+      # Update prometheus config
+      sed -i "s|# WORKER_SCRAPE_CONFIGS_PLACEHOLDER|$SCRAPE_CONFIGS|" "$PROMETHEUS_CONFIG"
+
+      echo "Prometheus config generated with $(echo "$WORKER_IPS" | jq -r '. | length') workers"
+
+runcmd:
+  # Create directories
+  - mkdir -p /opt/monitoring/prometheus/rules
+  - mkdir -p /opt/monitoring/grafana/provisioning/datasources
+  - mkdir -p /opt/monitoring/grafana/provisioning/dashboards
+  - mkdir -p /opt/monitoring/grafana/dashboards
+
+  # Start Docker
+  - systemctl enable docker
+  - systemctl start docker
+
+  # Wait for Docker
+  - sleep 10
+
+  # Generate Prometheus config with worker IPs
+  - /usr/local/bin/generate-prometheus-config.sh
+
+  # Copy dashboard (will be provided separately)
+  # - curl -o /opt/monitoring/grafana/dashboards/saorsa-testnet.json <dashboard-url>
+
+  # Start monitoring stack
+  - cd /opt/monitoring && docker-compose up -d
+
+final_message: "Saorsa monitoring server ready - Grafana at :3000, Prometheus at :9090"

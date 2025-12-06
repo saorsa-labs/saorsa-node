@@ -1,0 +1,115 @@
+groups:
+  - name: saorsa-node-alerts
+    rules:
+      # Node availability
+      - alert: SaorsaNodeDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saorsa node unreachable"
+          description: "Node {{ $labels.instance }} in {{ $labels.region }} has been down for more than 2 minutes"
+
+      # Health status
+      - alert: SaorsaNodeUnhealthy
+        expr: p2p_health_status == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saorsa node unhealthy"
+          description: "Node {{ $labels.instance }} is reporting unhealthy status for more than 5 minutes"
+
+      # Peer connectivity
+      - alert: SaorsaLowPeerCount
+        expr: p2p_network_peer_count < 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low peer count"
+          description: "Node {{ $labels.instance }} has only {{ $value }} peers (minimum 3 expected)"
+
+      - alert: SaorsaNoPeers
+        expr: p2p_network_peer_count == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node has no peers"
+          description: "Node {{ $labels.instance }} has no peers - potentially isolated"
+
+      # DHT health
+      - alert: SaorsaLowDHTSize
+        expr: p2p_dht_routing_table_size < 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low DHT routing table"
+          description: "Node {{ $labels.instance }} has only {{ $value }} DHT entries (minimum 20 expected)"
+
+      # Network stability
+      - alert: SaorsaHighPacketLoss
+        expr: rate(p2p_network_failed_connections_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High connection failure rate"
+          description: "Node {{ $labels.instance }} is experiencing high connection failures"
+
+  - name: saorsa-cluster-alerts
+    rules:
+      # Cluster-wide health
+      - alert: SaorsaClusterUnhealthy
+        expr: (sum(p2p_health_status == 1) / count(p2p_health_status)) < 0.95
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Cluster health below 95%"
+          description: "Only {{ $value | humanizePercentage }} of nodes are healthy"
+
+      # Regional issues
+      - alert: SaorsaRegionDegraded
+        expr: (sum(p2p_health_status == 1) by (region) / count(p2p_health_status) by (region)) < 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Region {{ $labels.region }} degraded"
+          description: "Only {{ $value | humanizePercentage }} of nodes in {{ $labels.region }} are healthy"
+
+      # Network partitioning
+      - alert: SaorsaPotentialPartition
+        expr: stddev(p2p_network_peer_count) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Possible network partition"
+          description: "High variance in peer counts suggests potential network partition"
+
+  - name: saorsa-payment-alerts
+    rules:
+      # Payment verification
+      - alert: SaorsaPaymentVerificationFailures
+        expr: rate(payment_verification_failed_total[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Payment verification failures"
+          description: "Node {{ $labels.instance }} has elevated payment verification failures"
+
+      # Quote generation
+      - alert: SaorsaQuoteGenerationSlow
+        expr: histogram_quantile(0.95, rate(quote_generation_duration_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow quote generation"
+          description: "95th percentile quote generation time is {{ $value }}s (expected < 1s)"

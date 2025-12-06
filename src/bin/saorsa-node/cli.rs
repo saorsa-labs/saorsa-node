@@ -2,7 +2,8 @@
 
 use clap::{Parser, ValueEnum};
 use saorsa_node::config::{
-    IpVersion, MigrationConfig, NodeConfig, PaymentConfig, UpgradeChannel, UpgradeConfig,
+    EvmNetworkConfig, IpVersion, MigrationConfig, NodeConfig, PaymentConfig, UpgradeChannel,
+    UpgradeConfig,
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -61,6 +62,18 @@ pub struct Cli {
     #[arg(long, default_value = "100000", env = "SAORSA_CACHE_CAPACITY")]
     pub cache_capacity: usize,
 
+    /// EVM wallet address for receiving payments (e.g., "0x...").
+    #[arg(long, env = "SAORSA_REWARDS_ADDRESS")]
+    pub rewards_address: Option<String>,
+
+    /// EVM network for payment processing.
+    #[arg(long, value_enum, default_value = "arbitrum-one", env = "SAORSA_EVM_NETWORK")]
+    pub evm_network: CliEvmNetwork,
+
+    /// Metrics port for Prometheus scraping (0 to disable).
+    #[arg(long, default_value = "9100", env = "SAORSA_METRICS_PORT")]
+    pub metrics_port: u16,
+
     /// Log level.
     #[arg(long, value_enum, default_value = "info", env = "RUST_LOG")]
     pub log_level: CliLogLevel,
@@ -88,6 +101,18 @@ pub enum CliUpgradeChannel {
     Stable,
     /// Beta releases.
     Beta,
+}
+
+/// EVM network CLI enum.
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+pub enum CliEvmNetwork {
+    /// Arbitrum One mainnet.
+    #[default]
+    #[value(name = "arbitrum-one")]
+    ArbitrumOne,
+    /// Arbitrum Sepolia testnet.
+    #[value(name = "arbitrum-sepolia")]
+    ArbitrumSepolia,
 }
 
 /// Log level CLI enum.
@@ -148,6 +173,9 @@ impl Cli {
             enabled: !self.disable_payment_verification,
             autonomi_bootstrap: self.autonomi_bootstrap,
             cache_capacity: self.cache_capacity,
+            rewards_address: self.rewards_address,
+            evm_network: self.evm_network.into(),
+            metrics_port: self.metrics_port,
             ..config.payment
         };
 
@@ -170,6 +198,15 @@ impl From<CliUpgradeChannel> for UpgradeChannel {
         match c {
             CliUpgradeChannel::Stable => Self::Stable,
             CliUpgradeChannel::Beta => Self::Beta,
+        }
+    }
+}
+
+impl From<CliEvmNetwork> for EvmNetworkConfig {
+    fn from(n: CliEvmNetwork) -> Self {
+        match n {
+            CliEvmNetwork::ArbitrumOne => Self::ArbitrumOne,
+            CliEvmNetwork::ArbitrumSepolia => Self::ArbitrumSepolia,
         }
     }
 }

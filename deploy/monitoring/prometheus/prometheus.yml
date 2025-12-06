@@ -1,0 +1,80 @@
+# Saorsa Testnet Prometheus Configuration
+# Scrapes metrics from 500 nodes across 5 workers
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'saorsa-testnet'
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # NYC1 Worker (100 nodes)
+  - job_name: 'saorsa-nyc1'
+    static_configs:
+      - targets:
+          # Ports 9100-9199 for 100 nodes
+          - 'WORKER_NYC1_IP:9100'
+          - 'WORKER_NYC1_IP:9101'
+          - 'WORKER_NYC1_IP:9102'
+          - 'WORKER_NYC1_IP:9103'
+          - 'WORKER_NYC1_IP:9104'
+          # ... (generate full list with script)
+        labels:
+          region: 'nyc1'
+          worker: 'saorsa-worker-nyc1'
+
+  # SFO3 Worker (100 nodes)
+  - job_name: 'saorsa-sfo3'
+    static_configs:
+      - targets:
+          - 'WORKER_SFO3_IP:9100'
+          # ... (ports 9100-9199)
+        labels:
+          region: 'sfo3'
+          worker: 'saorsa-worker-sfo3'
+
+  # LON1 Worker (100 nodes)
+  - job_name: 'saorsa-lon1'
+    static_configs:
+      - targets:
+          - 'WORKER_LON1_IP:9100'
+          # ... (ports 9100-9199)
+        labels:
+          region: 'lon1'
+          worker: 'saorsa-worker-lon1'
+
+  # AMS3 Worker (100 nodes)
+  - job_name: 'saorsa-ams3'
+    static_configs:
+      - targets:
+          - 'WORKER_AMS3_IP:9100'
+          # ... (ports 9100-9199)
+        labels:
+          region: 'ams3'
+          worker: 'saorsa-worker-ams3'
+
+  # SGP1 Worker (100 nodes)
+  - job_name: 'saorsa-sgp1'
+    static_configs:
+      - targets:
+          - 'WORKER_SGP1_IP:9100'
+          # ... (ports 9100-9199)
+        labels:
+          region: 'sgp1'
+          worker: 'saorsa-worker-sgp1'
+
+# Note: The cloud-init/monitoring.yml generates the full configuration
+# with all 100 ports per worker automatically. This file is a template.

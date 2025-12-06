@@ -32,6 +32,7 @@ saorsa-pqc = "0.3.12"
 autonomi = "0.7"
 ant-evm = "0.1"
 evmlib = "0.4"
+xor_name = "5"
 
 # Caching - LRU cache for verified XorNames
 lru = "0.12"

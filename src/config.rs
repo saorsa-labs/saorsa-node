@@ -173,6 +173,17 @@ pub struct MigrationConfig {
     pub ant_data_path: Option<PathBuf>,
 }
 
+/// EVM network for payment processing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EvmNetworkConfig {
+    /// Arbitrum One mainnet.
+    #[default]
+    ArbitrumOne,
+    /// Arbitrum Sepolia testnet.
+    ArbitrumSepolia,
+}
+
 /// Payment verification configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentConfig {
@@ -197,6 +208,20 @@ pub struct PaymentConfig {
     /// Query timeout in seconds for autonomi lookups.
     #[serde(default = "default_query_timeout")]
     pub query_timeout_secs: u64,
+
+    /// EVM wallet address for receiving payments (e.g., "0x...").
+    /// If not set, the node will not be able to receive payments.
+    #[serde(default)]
+    pub rewards_address: Option<String>,
+
+    /// EVM network for payment processing.
+    #[serde(default)]
+    pub evm_network: EvmNetworkConfig,
+
+    /// Metrics port for Prometheus scraping.
+    /// Set to 0 to disable metrics endpoint.
+    #[serde(default = "default_metrics_port")]
+    pub metrics_port: u16,
 }
 
 impl Default for PaymentConfig {
@@ -207,8 +232,15 @@ impl Default for PaymentConfig {
             cache_capacity: default_cache_capacity(),
             require_payment_on_error: default_require_payment_on_error(),
             query_timeout_secs: default_query_timeout(),
+            rewards_address: None,
+            evm_network: EvmNetworkConfig::default(),
+            metrics_port: default_metrics_port(),
         }
     }
+}
+
+const fn default_metrics_port() -> u16 {
+    9100
 }
 
 const fn default_payment_enabled() -> bool {
