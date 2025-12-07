@@ -24,8 +24,8 @@ path = "src/bin/keygen.rs"
 
 [dependencies]
 # Core (provides EVERYTHING: networking, DHT, security, trust, storage)
-# Published version from crates.io (v0.7.2 with bootstrap priority fix)
-saorsa-core = "0.7.2"
+# Published version from crates.io (v0.7.3 with routing_maintenance + bug fixes)
+saorsa-core = "0.7.3"
 saorsa-pqc = "0.3.12"
 
 # Payment verification - autonomi network lookup + EVM payment
