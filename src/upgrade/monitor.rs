@@ -886,6 +886,10 @@ mod tests {
         let current = Version::new(1, 0, 0);
         let arch = std::env::consts::ARCH;
         let os = std::env::consts::OS;
+        // On Windows, binary assets require .exe extension
+        #[cfg(windows)]
+        let bin_name = format!("saorsa-node-{arch}-{os}.exe");
+        #[cfg(not(windows))]
         let bin_name = format!("saorsa-node-{arch}-{os}");
         let releases = vec![
             GitHubRelease {
@@ -933,6 +937,10 @@ mod tests {
         let current = Version::new(1, 0, 0);
         let arch = std::env::consts::ARCH;
         let os = std::env::consts::OS;
+        // On Windows, binary assets require .exe extension
+        #[cfg(windows)]
+        let bin_name = format!("saorsa-node-{arch}-{os}.exe");
+        #[cfg(not(windows))]
         let bin_name = format!("saorsa-node-{arch}-{os}");
         let releases = vec![
             GitHubRelease {
