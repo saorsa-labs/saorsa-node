@@ -105,7 +105,7 @@ impl PaymentStatus {
 /// Combines:
 /// 1. LRU cache for fast lookups of previously verified `XorName` values
 /// 2. Autonomi network verification for checking if data already exists
-/// 3. EVM payment verification for new data (TODO)
+/// 3. EVM payment verification for new data
 pub struct PaymentVerifier {
     /// LRU cache of verified `XorName` values.
     cache: VerifiedCache,

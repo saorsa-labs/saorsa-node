@@ -1,11 +1,14 @@
 //! Node implementation - thin wrapper around saorsa-core's `P2PNode`.
 
-use crate::config::{IpVersion, NodeConfig};
+use crate::config::{IpVersion, NetworkMode, NodeConfig};
 use crate::error::{Error, Result};
 use crate::event::{create_event_channel, NodeEvent, NodeEventsChannel, NodeEventsSender};
 use crate::migration::AntDataMigrator;
 use crate::upgrade::UpgradeMonitor;
-use saorsa_core::{NodeConfig as CoreNodeConfig, P2PNode};
+use saorsa_core::{
+    IPDiversityConfig as CoreDiversityConfig, NodeConfig as CoreNodeConfig, P2PNode,
+    ProductionConfig as CoreProductionConfig,
+};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,11 +58,8 @@ impl NodeBuilder {
 
         // Create upgrade monitor if enabled
         let upgrade_monitor = if self.config.upgrade.enabled {
-            Some(Arc::new(UpgradeMonitor::new(
-                self.config.upgrade.github_repo.clone(),
-                self.config.upgrade.channel,
-                self.config.upgrade.check_interval_hours,
-            )))
+            let node_id_seed = p2p_node.peer_id().as_bytes();
+            Some(Self::build_upgrade_monitor(&self.config, node_id_seed))
         } else {
             None
         };
@@ -112,7 +112,53 @@ impl NodeBuilder {
         // Add bootstrap peers
         core_config.bootstrap_peers.clone_from(&config.bootstrap);
 
+        // Propagate network-mode tuning into saorsa-core where supported.
+        match config.network_mode {
+            NetworkMode::Production => {
+                core_config.production_config = Some(CoreProductionConfig::default());
+                core_config.diversity_config = Some(CoreDiversityConfig::default());
+            }
+            NetworkMode::Testnet => {
+                core_config.production_config = Some(CoreProductionConfig::default());
+                let mut diversity = CoreDiversityConfig::testnet();
+                diversity.max_nodes_per_asn = config.testnet.max_nodes_per_asn;
+                diversity.max_nodes_per_64 = config.testnet.max_nodes_per_64;
+                diversity.enable_geolocation_check = config.testnet.enable_geo_checks;
+                diversity.min_geographic_diversity = if config.testnet.enable_geo_checks {
+                    3
+                } else {
+                    1
+                };
+                core_config.diversity_config = Some(diversity);
+
+                if config.testnet.enforce_age_requirements {
+                    warn!(
+                        "testnet.enforce_age_requirements is set but saorsa-core does not yet \
+                         expose a knob; age checks may remain relaxed"
+                    );
+                }
+            }
+            NetworkMode::Development => {
+                core_config.production_config = None;
+                core_config.diversity_config = Some(CoreDiversityConfig::permissive());
+            }
+        }
+
         Ok(core_config)
+    }
+
+    fn build_upgrade_monitor(config: &NodeConfig, node_id_seed: &[u8]) -> Arc<UpgradeMonitor> {
+        let monitor = UpgradeMonitor::new(
+            config.upgrade.github_repo.clone(),
+            config.upgrade.channel,
+            config.upgrade.check_interval_hours,
+        );
+
+        if config.upgrade.staged_rollout_hours > 0 {
+            Arc::new(monitor.with_staged_rollout(node_id_seed, config.upgrade.staged_rollout_hours))
+        } else {
+            Arc::new(monitor)
+        }
     }
 }
 
@@ -302,5 +348,66 @@ impl RunningNode {
         if let Err(e) = self.shutdown_tx.send(true) {
             warn!("Failed to send shutdown signal: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_upgrade_monitor_staged_rollout_enabled() {
+        let config = NodeConfig {
+            upgrade: crate::config::UpgradeConfig {
+                enabled: true,
+                staged_rollout_hours: 24,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let seed = b"node-seed";
+
+        let monitor = NodeBuilder::build_upgrade_monitor(&config, seed);
+        assert!(monitor.has_staged_rollout());
+    }
+
+    #[test]
+    fn test_build_upgrade_monitor_staged_rollout_disabled() {
+        let config = NodeConfig {
+            upgrade: crate::config::UpgradeConfig {
+                enabled: true,
+                staged_rollout_hours: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let seed = b"node-seed";
+
+        let monitor = NodeBuilder::build_upgrade_monitor(&config, seed);
+        assert!(!monitor.has_staged_rollout());
+    }
+
+    #[test]
+    fn test_build_core_config_sets_production_mode() {
+        let config = NodeConfig {
+            network_mode: NetworkMode::Production,
+            ..Default::default()
+        };
+        let core = NodeBuilder::build_core_config(&config).expect("core config");
+        assert!(core.production_config.is_some());
+        assert!(core.diversity_config.is_some());
+    }
+
+    #[test]
+    fn test_build_core_config_sets_development_mode_relaxed() {
+        let config = NodeConfig {
+            network_mode: NetworkMode::Development,
+            ..Default::default()
+        };
+        let core = NodeBuilder::build_core_config(&config).expect("core config");
+        assert!(core.production_config.is_none());
+        let diversity = core.diversity_config.expect("diversity");
+        assert!(diversity.is_relaxed());
     }
 }

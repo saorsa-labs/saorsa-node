@@ -77,7 +77,10 @@ impl UpgradeMonitor {
             .user_agent(concat!("saorsa-node/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(30))
             .build()
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                warn!("Failed to build reqwest client for upgrades: {e}");
+                reqwest::Client::new()
+            });
 
         Self {
             repo,
@@ -119,7 +122,10 @@ impl UpgradeMonitor {
             .user_agent(concat!("saorsa-node/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(30))
             .build()
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                warn!("Failed to build reqwest client for upgrades: {e}");
+                reqwest::Client::new()
+            });
 
         Self {
             repo,
@@ -173,7 +179,7 @@ impl UpgradeMonitor {
     ///
     /// Returns an error if the GitHub API request fails.
     pub async fn check_for_updates(&self) -> Result<Option<UpgradeInfo>> {
-        let api_url = format!("https://api.github.com/repos/{}/releases/latest", self.repo);
+        let api_url = format!("https://api.github.com/repos/{}/releases", self.repo);
 
         debug!("Checking for updates from: {}", api_url);
 
@@ -192,12 +198,16 @@ impl UpgradeMonitor {
             )));
         }
 
-        let release: GitHubRelease = response
+        let releases: Vec<GitHubRelease> = response
             .json()
             .await
-            .map_err(|e| Error::Network(format!("Failed to parse release: {e}")))?;
+            .map_err(|e| Error::Network(format!("Failed to parse releases: {e}")))?;
 
-        Ok(self.process_release(&release))
+        Ok(select_upgrade_from_releases(
+            &releases,
+            &self.current_version,
+            self.channel,
+        ))
     }
 
     /// Check for available updates with staged rollout awareness.
@@ -307,6 +317,7 @@ impl UpgradeMonitor {
     }
 
     /// Process a GitHub release and determine if an upgrade is available.
+    #[allow(dead_code)]
     fn process_release(&self, release: &GitHubRelease) -> Option<UpgradeInfo> {
         let latest_version = version_from_tag(&release.tag_name)?;
 
@@ -343,6 +354,60 @@ impl UpgradeMonitor {
             release_notes: release.body.clone(),
         })
     }
+}
+
+/// Select the most appropriate upgrade from a list of releases.
+///
+/// For stable channel, pre-releases are ignored.
+/// For beta channel, pre-releases are eligible.
+///
+/// Returns the newest version that matches the channel and has platform assets.
+fn select_upgrade_from_releases(
+    releases: &[GitHubRelease],
+    current_version: &Version,
+    channel: UpgradeChannel,
+) -> Option<UpgradeInfo> {
+    let mut best: Option<UpgradeInfo> = None;
+
+    for release in releases {
+        let Some(version) = version_from_tag(&release.tag_name) else {
+            continue;
+        };
+
+        if version <= *current_version {
+            continue;
+        }
+
+        if channel == UpgradeChannel::Stable && !version.pre.is_empty() {
+            continue;
+        }
+
+        let Some(binary_asset) = find_platform_asset(&release.assets) else {
+            continue;
+        };
+
+        let sig_name = format!("{}.sig", binary_asset.name);
+        let Some(sig_asset) = release.assets.iter().find(|a| a.name == sig_name) else {
+            continue;
+        };
+
+        let candidate = UpgradeInfo {
+            version: version.clone(),
+            download_url: binary_asset.browser_download_url.clone(),
+            signature_url: sig_asset.browser_download_url.clone(),
+            release_notes: release.body.clone(),
+        };
+
+        let should_replace = best
+            .as_ref()
+            .map_or(true, |b| candidate.version > b.version);
+
+        if should_replace {
+            best = Some(candidate);
+        }
+    }
+
+    best
 }
 
 /// Parse version from git tag.
@@ -814,5 +879,99 @@ mod tests {
 
         let result = monitor.process_release(&release);
         assert!(result.is_none(), "Should gracefully handle invalid tag");
+    }
+
+    #[test]
+    fn test_select_upgrade_stable_ignores_prerelease() {
+        let current = Version::new(1, 0, 0);
+        let arch = std::env::consts::ARCH;
+        let os = std::env::consts::OS;
+        let bin_name = format!("saorsa-node-{arch}-{os}");
+        let releases = vec![
+            GitHubRelease {
+                tag_name: "v1.1.0-beta.1".to_string(),
+                name: "beta".to_string(),
+                body: "beta".to_string(),
+                prerelease: true,
+                assets: vec![
+                    Asset {
+                        name: bin_name.clone(),
+                        browser_download_url: "https://example.com/beta".to_string(),
+                    },
+                    Asset {
+                        name: format!("{bin_name}.sig"),
+                        browser_download_url: "https://example.com/beta.sig".to_string(),
+                    },
+                ],
+            },
+            GitHubRelease {
+                tag_name: "v1.1.0".to_string(),
+                name: "stable".to_string(),
+                body: "stable".to_string(),
+                prerelease: false,
+                assets: vec![
+                    Asset {
+                        name: bin_name.clone(),
+                        browser_download_url: "https://example.com/stable".to_string(),
+                    },
+                    Asset {
+                        name: format!("{bin_name}.sig"),
+                        browser_download_url: "https://example.com/stable.sig".to_string(),
+                    },
+                ],
+            },
+        ];
+
+        let upgrade =
+            select_upgrade_from_releases(&releases, &current, UpgradeChannel::Stable).unwrap();
+        assert_eq!(upgrade.version, Version::new(1, 1, 0));
+        assert!(upgrade.download_url.contains("stable"));
+    }
+
+    #[test]
+    fn test_select_upgrade_beta_accepts_prerelease_if_newest() {
+        let current = Version::new(1, 0, 0);
+        let arch = std::env::consts::ARCH;
+        let os = std::env::consts::OS;
+        let bin_name = format!("saorsa-node-{arch}-{os}");
+        let releases = vec![
+            GitHubRelease {
+                tag_name: "v1.1.0".to_string(),
+                name: "stable".to_string(),
+                body: "stable".to_string(),
+                prerelease: false,
+                assets: vec![
+                    Asset {
+                        name: bin_name.clone(),
+                        browser_download_url: "https://example.com/stable".to_string(),
+                    },
+                    Asset {
+                        name: format!("{bin_name}.sig"),
+                        browser_download_url: "https://example.com/stable.sig".to_string(),
+                    },
+                ],
+            },
+            GitHubRelease {
+                tag_name: "v1.2.0-beta.1".to_string(),
+                name: "beta".to_string(),
+                body: "beta".to_string(),
+                prerelease: true,
+                assets: vec![
+                    Asset {
+                        name: bin_name.clone(),
+                        browser_download_url: "https://example.com/beta".to_string(),
+                    },
+                    Asset {
+                        name: format!("{bin_name}.sig"),
+                        browser_download_url: "https://example.com/beta.sig".to_string(),
+                    },
+                ],
+            },
+        ];
+
+        let upgrade =
+            select_upgrade_from_releases(&releases, &current, UpgradeChannel::Beta).unwrap();
+        assert_eq!(upgrade.version, Version::parse("1.2.0-beta.1").unwrap());
+        assert!(upgrade.download_url.contains("beta"));
     }
 }

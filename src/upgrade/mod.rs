@@ -23,6 +23,12 @@ use std::fs;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
+/// Maximum allowed upgrade binary size (200 MiB).
+///
+/// This is a sanity limit to prevent memory exhaustion during ML-DSA verification,
+/// which requires loading the full binary into RAM.
+const MAX_BINARY_SIZE_BYTES: usize = 200 * 1024 * 1024;
+
 /// Information about an available upgrade.
 #[derive(Debug, Clone)]
 pub struct UpgradeInfo {
@@ -216,9 +222,35 @@ impl Upgrader {
             .await
             .map_err(|e| Error::Network(format!("Failed to read response: {e}")))?;
 
+        Self::enforce_max_binary_size(bytes.len())?;
+
         fs::write(dest, &bytes)?;
         debug!("Downloaded {} bytes to {}", bytes.len(), dest.display());
         Ok(())
+    }
+
+    /// Ensure the downloaded binary is within a sane size limit.
+    fn enforce_max_binary_size(len: usize) -> Result<()> {
+        if len > MAX_BINARY_SIZE_BYTES {
+            return Err(Error::Upgrade(format!(
+                "Downloaded binary too large: {len} bytes (max {MAX_BINARY_SIZE_BYTES})"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Create a temp directory for upgrades in the same directory as the target binary.
+    ///
+    /// Ensures `fs::rename` is atomic by keeping source/target on the same filesystem.
+    fn create_tempdir_in_target_dir(current_binary: &Path) -> Result<tempfile::TempDir> {
+        let target_dir = current_binary
+            .parent()
+            .ok_or_else(|| Error::Upgrade("Current binary has no parent directory".to_string()))?;
+
+        tempfile::Builder::new()
+            .prefix("saorsa-upgrade-")
+            .tempdir_in(target_dir)
+            .map_err(|e| Error::Upgrade(format!("Failed to create temp dir: {e}")))
     }
 
     /// Perform upgrade with rollback support.
@@ -246,6 +278,18 @@ impl Upgrader {
         current_binary: &Path,
         rollback_dir: &Path,
     ) -> Result<UpgradeResult> {
+        // Auto-upgrade on Windows is not supported yet due to running-binary locks.
+        // We fail closed with an explicit reason rather than attempting a broken replace.
+        if !Self::auto_upgrade_supported() {
+            warn!(
+                "Auto-upgrade is not supported on this platform; refusing upgrade to {}",
+                info.version
+            );
+            return Ok(UpgradeResult::RolledBack {
+                reason: "Auto-upgrade not supported on this platform".to_string(),
+            });
+        }
+
         // 1. Validate upgrade
         self.validate_upgrade(info)?;
 
@@ -253,7 +297,7 @@ impl Upgrader {
         self.create_backup(current_binary, rollback_dir)?;
 
         // 3. Download new binary and signature to temp directory
-        let temp_dir = tempfile::tempdir()?;
+        let temp_dir = Self::create_tempdir_in_target_dir(current_binary)?;
         let new_binary = temp_dir.path().join("new_binary");
         let sig_path = temp_dir.path().join("signature");
 
@@ -296,6 +340,13 @@ impl Upgrader {
         Ok(UpgradeResult::Success {
             version: info.version.clone(),
         })
+    }
+
+    /// Whether the current platform supports in-place auto-upgrade.
+    ///
+    /// On Windows, replacing a running executable is typically blocked by file locks.
+    const fn auto_upgrade_supported() -> bool {
+        !cfg!(windows)
     }
 }
 
@@ -599,5 +650,45 @@ mod tests {
         let result = upgrader.create_backup(&current, &rollback_dir);
 
         assert!(result.is_err(), "Should fail if rollback dir doesn't exist");
+    }
+
+    /// Test 16: Tempdir for upgrades is created in target directory.
+    #[test]
+    fn test_tempdir_in_target_dir() {
+        let temp = TempDir::new().unwrap();
+        let current = temp.path().join("binary");
+        fs::write(&current, b"content").unwrap();
+
+        let tempdir = Upgrader::create_tempdir_in_target_dir(&current).unwrap();
+
+        assert_eq!(
+            tempdir.path().parent().unwrap(),
+            temp.path(),
+            "Upgrade tempdir should be in same dir as target"
+        );
+    }
+
+    /// Test 17: Enforce max binary size rejects huge downloads.
+    #[test]
+    fn test_enforce_max_binary_size_rejects_large() {
+        let too_large = MAX_BINARY_SIZE_BYTES + 1;
+        let result = Upgrader::enforce_max_binary_size(too_large);
+        assert!(result.is_err());
+    }
+
+    /// Test 18: Enforce max binary size accepts reasonable downloads.
+    #[test]
+    fn test_enforce_max_binary_size_accepts_small() {
+        let result = Upgrader::enforce_max_binary_size(1024);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_auto_upgrade_supported_flag_matches_platform() {
+        if cfg!(windows) {
+            assert!(!Upgrader::auto_upgrade_supported());
+        } else {
+            assert!(Upgrader::auto_upgrade_supported());
+        }
     }
 }
