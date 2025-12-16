@@ -126,6 +126,10 @@ pub struct NodeConfig {
     #[serde(default)]
     pub payment: PaymentConfig,
 
+    /// Attestation configuration for software integrity verification.
+    #[serde(default)]
+    pub attestation: AttestationNodeConfig,
+
     /// Log level.
     #[serde(default = "default_log_level")]
     pub log_level: String,
@@ -243,6 +247,128 @@ const fn default_metrics_port() -> u16 {
     9100
 }
 
+// ============================================================================
+// Attestation Configuration
+// ============================================================================
+
+/// Attestation enforcement mode.
+///
+/// Controls how the node responds to attestation verification failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttestationMode {
+    /// Attestation is completely disabled (default).
+    /// No verification is performed.
+    #[default]
+    Off,
+    /// Soft enforcement: log warnings but don't reject connections.
+    /// Useful for testing and gradual rollout.
+    Soft,
+    /// Hard enforcement: reject peers with invalid attestations.
+    /// Requires `zkvm-prover` or `zkvm-verifier-groth16` feature for security.
+    Hard,
+}
+
+/// Attestation configuration for software integrity verification.
+///
+/// # Security Warning
+///
+/// **Without the `zkvm-prover` feature enabled, attestation proofs are accepted
+/// without cryptographic verification (mock prover).** This provides **NO SECURITY**.
+///
+/// For production deployments:
+/// - Enable `zkvm-prover` feature for post-quantum secure STARK verification
+/// - Or enable `zkvm-verifier-groth16` for Groth16 verification (NOT post-quantum secure)
+///
+/// The node will **block startup** if attestation is enabled without a verification feature.
+///
+/// # Example Configuration
+///
+/// ```toml
+/// [attestation]
+/// enabled = true
+/// mode = "hard"
+/// require_pq_secure = true
+/// allowed_binary_hashes = ["a1b2c3..."]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttestationNodeConfig {
+    /// Enable attestation verification.
+    /// Default: false (disabled for backward compatibility)
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Enforcement mode for attestation verification.
+    /// Default: off
+    #[serde(default)]
+    pub mode: AttestationMode,
+
+    /// Require post-quantum secure verification.
+    /// If true, only STARK proofs (via `zkvm-prover`) are accepted.
+    /// If false, Groth16 proofs are also accepted.
+    /// Default: true
+    #[serde(default = "default_require_pq_secure")]
+    pub require_pq_secure: bool,
+
+    /// Allowed binary hashes (hex-encoded, 64 characters each).
+    /// Empty list = permissive mode (all binaries allowed).
+    /// In production, set specific hashes of authorized binaries.
+    #[serde(default)]
+    pub allowed_binary_hashes: Vec<String>,
+
+    /// Grace period in days after sunset before hard rejection.
+    /// During the grace period, nodes can still connect but with warnings.
+    /// Default: 30
+    #[serde(default = "default_sunset_grace_days")]
+    pub sunset_grace_days: u32,
+}
+
+impl Default for AttestationNodeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: AttestationMode::Off,
+            require_pq_secure: default_require_pq_secure(),
+            allowed_binary_hashes: Vec::new(),
+            sunset_grace_days: default_sunset_grace_days(),
+        }
+    }
+}
+
+impl AttestationNodeConfig {
+    /// Development configuration: soft enforcement, all binaries allowed.
+    #[must_use]
+    pub fn development() -> Self {
+        Self {
+            enabled: true,
+            mode: AttestationMode::Soft,
+            require_pq_secure: false,
+            allowed_binary_hashes: Vec::new(),
+            sunset_grace_days: 365,
+        }
+    }
+
+    /// Production configuration: hard enforcement with specific allowed binaries.
+    #[must_use]
+    pub fn production(allowed_binary_hashes: Vec<String>) -> Self {
+        Self {
+            enabled: true,
+            mode: AttestationMode::Hard,
+            require_pq_secure: true,
+            allowed_binary_hashes,
+            sunset_grace_days: 30,
+        }
+    }
+}
+
+const fn default_require_pq_secure() -> bool {
+    true
+}
+
+const fn default_sunset_grace_days() -> u32 {
+    30
+}
+
 const fn default_payment_enabled() -> bool {
     true
 }
@@ -271,6 +397,7 @@ impl Default for NodeConfig {
             upgrade: UpgradeConfig::default(),
             migration: MigrationConfig::default(),
             payment: PaymentConfig::default(),
+            attestation: AttestationNodeConfig::default(),
             log_level: default_log_level(),
         }
     }

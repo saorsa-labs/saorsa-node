@@ -1,11 +1,13 @@
 //! Node implementation - thin wrapper around saorsa-core's `P2PNode`.
 
-use crate::config::{IpVersion, NetworkMode, NodeConfig};
+use crate::attestation::VerificationLevel;
+use crate::config::{AttestationMode, AttestationNodeConfig, IpVersion, NetworkMode, NodeConfig};
 use crate::error::{Error, Result};
 use crate::event::{create_event_channel, NodeEvent, NodeEventsChannel, NodeEventsSender};
 use crate::migration::AntDataMigrator;
 use crate::upgrade::UpgradeMonitor;
 use saorsa_core::{
+    AttestationConfig as CoreAttestationConfig, EnforcementMode as CoreEnforcementMode,
     IPDiversityConfig as CoreDiversityConfig, NodeConfig as CoreNodeConfig, P2PNode,
     ProductionConfig as CoreProductionConfig,
 };
@@ -34,9 +36,13 @@ impl NodeBuilder {
     ///
     /// # Errors
     ///
-    /// Returns an error if the node fails to start.
+    /// Returns an error if the node fails to start, or if attestation is enabled
+    /// without a proper verification feature (blocks startup for security).
     pub async fn build(self) -> Result<RunningNode> {
         info!("Building saorsa-node with config: {:?}", self.config);
+
+        // Validate attestation security BEFORE proceeding
+        Self::validate_attestation_security(&self.config)?;
 
         // Ensure root directory exists
         std::fs::create_dir_all(&self.config.root_dir)?;
@@ -144,7 +150,113 @@ impl NodeBuilder {
             }
         }
 
+        // Configure attestation
+        core_config.attestation_config = Self::build_attestation_config(&config.attestation)?;
+
         Ok(core_config)
+    }
+
+    /// Validate attestation security configuration.
+    ///
+    /// **BLOCKS STARTUP** if attestation is enabled without a verification feature.
+    fn validate_attestation_security(config: &NodeConfig) -> Result<()> {
+        if !config.attestation.enabled {
+            return Ok(());
+        }
+
+        let level = VerificationLevel::current();
+        info!("Attestation verification level: {}", level);
+
+        match level {
+            VerificationLevel::None => {
+                error!("SECURITY: Attestation enabled without verification feature!");
+                error!(
+                    "Enable zkvm-prover or zkvm-verifier-groth16 feature for real verification."
+                );
+                error!("Build with: cargo build --features zkvm-prover");
+                return Err(Error::Config(
+                    "Attestation requires zkvm-prover or zkvm-verifier-groth16 feature. \
+                     Without a verification feature, proofs use mock verification \
+                     which provides NO CRYPTOGRAPHIC SECURITY. \
+                     Build with: cargo build --features zkvm-prover"
+                        .into(),
+                ));
+            }
+            VerificationLevel::Groth16 => {
+                if config.attestation.require_pq_secure {
+                    error!(
+                        "SECURITY: require_pq_secure=true but only Groth16 verification available"
+                    );
+                    return Err(Error::Config(
+                        "require_pq_secure=true but only Groth16 available (not post-quantum secure). \
+                         Either enable zkvm-prover feature for STARK verification, \
+                         or set require_pq_secure=false in attestation config."
+                            .into(),
+                    ));
+                }
+                warn!(
+                    "Attestation using Groth16 verification - NOT post-quantum secure. \
+                     Consider enabling zkvm-prover feature for production deployments."
+                );
+            }
+            VerificationLevel::Stark => {
+                info!("Attestation using STARK verification (post-quantum secure)");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Build the saorsa-core `AttestationConfig` from our config.
+    fn build_attestation_config(config: &AttestationNodeConfig) -> Result<CoreAttestationConfig> {
+        let enforcement_mode = match config.mode {
+            AttestationMode::Off => CoreEnforcementMode::Off,
+            AttestationMode::Soft => CoreEnforcementMode::Soft,
+            AttestationMode::Hard => CoreEnforcementMode::Hard,
+        };
+
+        // Parse hex-encoded binary hashes
+        let allowed_binary_hashes = config
+            .allowed_binary_hashes
+            .iter()
+            .map(|hex_str| {
+                let bytes = hex::decode(hex_str).map_err(|e| {
+                    Error::Config(format!(
+                        "Invalid hex in allowed_binary_hashes '{hex_str}': {e}"
+                    ))
+                })?;
+                if bytes.len() != 32 {
+                    let len = bytes.len();
+                    return Err(Error::Config(format!(
+                        "Binary hash must be 32 bytes (64 hex chars), got {len} bytes for '{hex_str}'"
+                    )));
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Ok(arr)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        if config.mode == AttestationMode::Hard && config.enabled {
+            if allowed_binary_hashes.is_empty() {
+                warn!(
+                    "Attestation in Hard mode with empty allowed_binary_hashes - \
+                     all binaries will be accepted. Consider specifying allowed hashes."
+                );
+            } else {
+                info!(
+                    "Attestation in Hard mode with {} allowed binary hash(es)",
+                    allowed_binary_hashes.len()
+                );
+            }
+        }
+
+        Ok(CoreAttestationConfig {
+            enabled: config.enabled,
+            enforcement_mode,
+            allowed_binary_hashes,
+            sunset_grace_days: config.sunset_grace_days,
+        })
     }
 
     fn build_upgrade_monitor(config: &NodeConfig, node_id_seed: &[u8]) -> Arc<UpgradeMonitor> {

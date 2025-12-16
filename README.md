@@ -23,8 +23,9 @@ saorsa-node is the next-generation node software for the Autonomi decentralized 
 11. [Quick Start](#quick-start)
 12. [CLI Reference](#cli-reference)
 13. [Configuration](#configuration)
-14. [Security Considerations](#security-considerations)
-15. [Related Projects](#related-projects)
+14. [Software Attestation](#software-attestation)
+15. [Security Considerations](#security-considerations)
+16. [Related Projects](#related-projects)
 
 ---
 
@@ -931,6 +932,80 @@ evm_network = "arbitrum-one"
 # Cache configuration
 cache_capacity = 100000
 ```
+
+---
+
+## Software Attestation
+
+saorsa-node supports **software attestation** via saorsa-core's Entangled Attestation system. This cryptographically binds a node's identity to its running software, preventing attackers from maintaining reputation while running modified code.
+
+### Security Levels
+
+| Feature Flag | Verification | Security Level |
+|--------------|--------------|----------------|
+| `zkvm-prover` | STARK proofs | **Post-quantum secure** |
+| `zkvm-verifier-groth16` | Groth16 proofs | Not post-quantum secure |
+| None | Mock verification | **NO CRYPTOGRAPHIC SECURITY** |
+
+### Configuration
+
+```toml
+[attestation]
+# Enable attestation verification
+enabled = true
+
+# Enforcement mode: "off", "soft", "hard"
+# - off: disabled completely
+# - soft: log warnings but allow connections
+# - hard: reject peers with invalid attestations
+mode = "hard"
+
+# Require post-quantum secure verification (STARK)
+# If false, Groth16 is also accepted
+require_pq_secure = true
+
+# Allowed binary hashes (hex-encoded, 64 chars each)
+# Empty = allow all binaries (permissive mode)
+allowed_binary_hashes = [
+    "a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd"
+]
+
+# Grace period after sunset (days)
+sunset_grace_days = 30
+```
+
+### Building with Verification Features
+
+**For production deployments**, enable cryptographic verification:
+
+```bash
+# Recommended: Post-quantum secure STARK verification
+cargo build --release --features zkvm-prover
+
+# Alternative: Groth16 verification (NOT post-quantum secure)
+cargo build --release --features zkvm-verifier-groth16
+```
+
+### Security Warnings
+
+**Without a verification feature**, the build will emit warnings:
+
+```
+warning: SECURITY WARNING: No attestation verification feature enabled!
+warning: If you enable attestation, proofs will use mock verification with NO CRYPTOGRAPHIC SECURITY.
+```
+
+**If attestation is enabled without verification features**, the node will **block startup** with a clear error message.
+
+### Startup Behavior
+
+| Config | Feature | Result |
+|--------|---------|--------|
+| `enabled = false` | Any | Starts normally, attestation disabled |
+| `enabled = true` | `zkvm-prover` | Starts with STARK verification |
+| `enabled = true` | `zkvm-verifier-groth16` | Starts with Groth16 verification |
+| `enabled = true` | None | **BLOCKS STARTUP** - error message |
+| `mode = "hard"`, `require_pq_secure = true` | `zkvm-verifier-groth16` only | **BLOCKS STARTUP** - PQ required |
 
 ---
 

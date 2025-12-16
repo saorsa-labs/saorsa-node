@@ -34,6 +34,7 @@
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
 
+pub mod attestation;
 pub mod client;
 pub mod config;
 pub mod error;
@@ -41,6 +42,8 @@ pub mod event;
 pub mod migration;
 pub mod node;
 pub mod payment;
+#[cfg(test)]
+mod probe;
 pub mod upgrade;
 
 pub use client::{HybridClient, HybridConfig, HybridStats};
