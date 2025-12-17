@@ -40,6 +40,7 @@ mod anvil;
 mod data_types;
 mod harness;
 mod testnet;
+mod testnet_data_ops;
 
 #[cfg(test)]
 mod integration_tests;

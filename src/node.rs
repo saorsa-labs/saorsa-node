@@ -5,7 +5,7 @@ use crate::config::{AttestationMode, AttestationNodeConfig, IpVersion, NetworkMo
 use crate::error::{Error, Result};
 use crate::event::{create_event_channel, NodeEvent, NodeEventsChannel, NodeEventsSender};
 use crate::migration::AntDataMigrator;
-use crate::upgrade::UpgradeMonitor;
+use crate::upgrade::{AutoApplyUpgrader, UpgradeMonitor, UpgradeResult};
 use saorsa_core::{
     AttestationConfig as CoreAttestationConfig, EnforcementMode as CoreEnforcementMode,
     IPDiversityConfig as CoreDiversityConfig, NodeConfig as CoreNodeConfig, P2PNode,
@@ -360,6 +360,8 @@ impl RunningNode {
             let mut shutdown_rx = self.shutdown_rx.clone();
 
             tokio::spawn(async move {
+                let upgrader = AutoApplyUpgrader::new();
+
                 loop {
                     tokio::select! {
                         _ = shutdown_rx.changed() => {
@@ -369,10 +371,35 @@ impl RunningNode {
                         }
                         result = monitor.check_for_updates() => {
                             if let Ok(Some(upgrade_info)) = result {
+                                info!(
+                                    "Upgrade available: {} -> {}",
+                                    upgrader.current_version(),
+                                    upgrade_info.version
+                                );
+
+                                // Send notification event
                                 if let Err(e) = events_tx.send(NodeEvent::UpgradeAvailable {
                                     version: upgrade_info.version.to_string(),
                                 }) {
                                     warn!("Failed to send UpgradeAvailable event: {e}");
+                                }
+
+                                // Auto-apply the upgrade
+                                info!("Starting auto-apply upgrade...");
+                                match upgrader.apply_upgrade(&upgrade_info).await {
+                                    Ok(UpgradeResult::Success { version }) => {
+                                        info!("Upgrade to {} successful! Process will restart.", version);
+                                        // If we reach here, exec() failed or not supported
+                                    }
+                                    Ok(UpgradeResult::RolledBack { reason }) => {
+                                        warn!("Upgrade rolled back: {}", reason);
+                                    }
+                                    Ok(UpgradeResult::NoUpgrade) => {
+                                        debug!("No upgrade needed");
+                                    }
+                                    Err(e) => {
+                                        error!("Critical upgrade error: {}", e);
+                                    }
                                 }
                             }
                             // Wait for next check interval

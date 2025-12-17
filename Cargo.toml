@@ -1,6 +1,6 @@
 [package]
 name = "saorsa-node"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = ["David Irvine <david.irvine@maidsafe.net>"]
 description = "Pure quantum-proof network node for the Saorsa decentralized network"
@@ -74,6 +74,10 @@ hex = "0.4"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
+
+# Archive extraction for auto-upgrade
+flate2 = "1"
+tar = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"

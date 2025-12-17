@@ -497,7 +497,7 @@ const fn default_check_interval() -> u64 {
 }
 
 const fn default_staged_rollout_hours() -> u64 {
-    24 // 24 hour window for staged rollout
+    1 // 1 hour window for staged rollout (testing)
 }
 
 /// Default testnet bootstrap nodes.

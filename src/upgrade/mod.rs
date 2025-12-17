@@ -5,11 +5,14 @@
 //! - Verifying ML-DSA-65 signatures on binaries
 //! - Replacing the running binary with rollback support
 //! - Staged rollout to prevent mass network restarts
+//! - Auto-apply: download, extract, verify, replace, restart
 
+mod apply;
 mod monitor;
 mod rollout;
 mod signature;
 
+pub use apply::AutoApplyUpgrader;
 pub use monitor::{find_platform_asset, version_from_tag, Asset, GitHubRelease, UpgradeMonitor};
 pub use rollout::StagedRollout;
 pub use signature::{
