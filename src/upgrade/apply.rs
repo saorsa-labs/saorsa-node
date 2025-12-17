@@ -135,7 +135,7 @@ impl AutoApplyUpgrader {
 
         // Step 4: Extract binary from verified archive
         info!("Extracting binary from archive...");
-        let extracted_binary = match self.extract_binary(&archive_path, temp_dir.path()) {
+        let extracted_binary = match Self::extract_binary(&archive_path, temp_dir.path()) {
             Ok(path) => path,
             Err(e) => {
                 warn!("Extraction failed: {e}");
@@ -150,8 +150,7 @@ impl AutoApplyUpgrader {
             "{}.backup",
             current_binary
                 .file_name()
-                .map(|s| s.to_string_lossy())
-                .unwrap_or_else(|| "saorsa-node".into())
+                .map_or_else(|| "saorsa-node".into(), |s| s.to_string_lossy())
         ));
         info!("Creating backup at {}...", backup_path.display());
         if let Err(e) = fs::copy(&current_binary, &backup_path) {
@@ -163,13 +162,11 @@ impl AutoApplyUpgrader {
 
         // Step 6: Replace binary
         info!("Replacing binary...");
-        if let Err(e) = self.replace_binary(&extracted_binary, &current_binary) {
+        if let Err(e) = Self::replace_binary(&extracted_binary, &current_binary) {
             warn!("Binary replacement failed: {e}");
             // Attempt rollback
             if let Err(restore_err) = fs::copy(&backup_path, &current_binary) {
-                error!(
-                    "CRITICAL: Replacement failed ({e}) AND rollback failed ({restore_err})"
-                );
+                error!("CRITICAL: Replacement failed ({e}) AND rollback failed ({restore_err})");
                 return Err(Error::Upgrade(format!(
                     "Critical: replacement failed ({e}) AND rollback failed ({restore_err})"
                 )));
@@ -185,7 +182,7 @@ impl AutoApplyUpgrader {
         );
 
         // Step 7: Trigger restart
-        self.trigger_restart(&current_binary)?;
+        Self::trigger_restart(&current_binary)?;
 
         Ok(UpgradeResult::Success {
             version: info.version.clone(),
@@ -229,7 +226,7 @@ impl AutoApplyUpgrader {
     }
 
     /// Extract the saorsa-node binary from a tar.gz archive.
-    fn extract_binary(&self, archive_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
+    fn extract_binary(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
         let file = File::open(archive_path)?;
         let decoder = GzDecoder::new(file);
         let mut archive = Archive::new(decoder);
@@ -280,7 +277,7 @@ impl AutoApplyUpgrader {
     }
 
     /// Replace the current binary with the new one.
-    fn replace_binary(&self, new_binary: &Path, target: &Path) -> Result<()> {
+    fn replace_binary(new_binary: &Path, target: &Path) -> Result<()> {
         // Preserve original permissions on Unix
         #[cfg(unix)]
         {
@@ -298,9 +295,9 @@ impl AutoApplyUpgrader {
 
     /// Trigger a restart of the node process.
     ///
-    /// On Unix, uses exec() to replace the current process.
+    /// On Unix, uses `exec()` to replace the current process.
     /// The calling code should ensure graceful shutdown before calling this.
-    fn trigger_restart(&self, binary_path: &Path) -> Result<()> {
+    fn trigger_restart(binary_path: &Path) -> Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -308,11 +305,7 @@ impl AutoApplyUpgrader {
             // Collect current args (skip the binary name)
             let args: Vec<String> = env::args().skip(1).collect();
 
-            info!(
-                "Executing restart: {} {:?}",
-                binary_path.display(),
-                args
-            );
+            info!("Executing restart: {} {:?}", binary_path.display(), args);
 
             // exec() replaces the current process
             let err = std::process::Command::new(binary_path).args(&args).exec();
@@ -326,9 +319,7 @@ impl AutoApplyUpgrader {
             // On Windows, we can't replace a running binary
             // Just log and let the user restart manually
             let _ = binary_path; // Suppress unused warning on Windows
-            warn!(
-                "Auto-restart not supported on this platform. Please restart manually."
-            );
+            warn!("Auto-restart not supported on this platform. Please restart manually.");
             Ok(())
         }
     }

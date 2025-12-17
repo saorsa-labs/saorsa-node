@@ -566,7 +566,11 @@ async fn test_pointer_chain(node: &P2PNode, results: &mut TestResults) {
     let ptr_c_address = compute_pointer_address(&owner_c);
 
     // Store chunk
-    if node.dht_put(chunk_address, chunk_data.clone()).await.is_err() {
+    if node
+        .dht_put(chunk_address, chunk_data.clone())
+        .await
+        .is_err()
+    {
         results.fail(test_name, "Chunk store failed");
         return;
     }
@@ -967,8 +971,5 @@ async fn run_comprehensive_data_tests() {
     println!("{}", results.summary());
 
     // Assert overall success
-    assert!(
-        results.failed == 0,
-        "Some tests failed! See details above."
-    );
+    assert!(results.failed == 0, "Some tests failed! See details above.");
 }
