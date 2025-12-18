@@ -2,8 +2,8 @@
 
 use clap::{Parser, ValueEnum};
 use saorsa_node::config::{
-    EvmNetworkConfig, IpVersion, NetworkMode, NodeConfig, PaymentConfig, UpgradeChannel,
-    UpgradeConfig,
+    BootstrapCacheConfig, EvmNetworkConfig, IpVersion, NetworkMode, NodeConfig, PaymentConfig,
+    UpgradeChannel, UpgradeConfig,
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -80,6 +80,18 @@ pub struct Cli {
     /// Path to configuration file.
     #[arg(long, short)]
     pub config: Option<PathBuf>,
+
+    /// Disable persistent bootstrap cache.
+    #[arg(long)]
+    pub disable_bootstrap_cache: bool,
+
+    /// Directory for bootstrap cache files.
+    #[arg(long, env = "SAORSA_BOOTSTRAP_CACHE_DIR")]
+    pub bootstrap_cache_dir: Option<PathBuf>,
+
+    /// Maximum peers to cache in the bootstrap cache.
+    #[arg(long, default_value = "10000", env = "SAORSA_BOOTSTRAP_CACHE_CAPACITY")]
+    pub bootstrap_cache_capacity: usize,
 }
 
 /// IP version CLI enum.
@@ -183,6 +195,14 @@ impl Cli {
             rewards_address: self.rewards_address,
             evm_network: self.evm_network.into(),
             metrics_port: self.metrics_port,
+        };
+
+        // Bootstrap cache config
+        config.bootstrap_cache = BootstrapCacheConfig {
+            enabled: !self.disable_bootstrap_cache,
+            cache_dir: self.bootstrap_cache_dir,
+            max_contacts: self.bootstrap_cache_capacity,
+            ..config.bootstrap_cache
         };
 
         Ok(config)

@@ -6,10 +6,12 @@ use crate::error::{Error, Result};
 use crate::event::{create_event_channel, NodeEvent, NodeEventsChannel, NodeEventsSender};
 use crate::upgrade::{AutoApplyUpgrader, UpgradeMonitor, UpgradeResult};
 use saorsa_core::{
-    AttestationConfig as CoreAttestationConfig, EnforcementMode as CoreEnforcementMode,
+    AttestationConfig as CoreAttestationConfig, BootstrapManager,
+    CacheConfig as CoreCacheConfig, EnforcementMode as CoreEnforcementMode,
     IPDiversityConfig as CoreDiversityConfig, NodeConfig as CoreNodeConfig, P2PNode,
     ProductionConfig as CoreProductionConfig,
 };
+use std::time::Duration;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -69,6 +71,14 @@ impl NodeBuilder {
             None
         };
 
+        // Initialize bootstrap cache manager if enabled
+        let bootstrap_manager = if self.config.bootstrap_cache.enabled {
+            Self::build_bootstrap_manager(&self.config).await
+        } else {
+            info!("Bootstrap cache disabled");
+            None
+        };
+
         let node = RunningNode {
             config: self.config,
             p2p_node: Arc::new(p2p_node),
@@ -77,6 +87,7 @@ impl NodeBuilder {
             events_tx,
             events_rx: Some(events_rx),
             upgrade_monitor,
+            bootstrap_manager,
         };
 
         Ok(node)
@@ -261,6 +272,44 @@ impl NodeBuilder {
             Arc::new(monitor)
         }
     }
+
+    /// Build the bootstrap cache manager from config.
+    async fn build_bootstrap_manager(config: &NodeConfig) -> Option<BootstrapManager> {
+        let cache_dir = config
+            .bootstrap_cache
+            .cache_dir
+            .clone()
+            .unwrap_or_else(|| config.root_dir.join("bootstrap_cache"));
+
+        // Create cache directory
+        if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+            warn!("Failed to create bootstrap cache directory: {}", e);
+            return None;
+        }
+
+        let cache_config = CoreCacheConfig {
+            cache_dir,
+            max_contacts: config.bootstrap_cache.max_contacts,
+            stale_threshold: Duration::from_secs(
+                config.bootstrap_cache.stale_threshold_days * 86400,
+            ),
+            ..CoreCacheConfig::default()
+        };
+
+        match BootstrapManager::with_config(cache_config).await {
+            Ok(manager) => {
+                info!(
+                    "Bootstrap cache initialized with {} max contacts",
+                    config.bootstrap_cache.max_contacts
+                );
+                Some(manager)
+            }
+            Err(e) => {
+                warn!("Failed to initialize bootstrap cache: {}", e);
+                None
+            }
+        }
+    }
 }
 
 /// A running saorsa node.
@@ -272,6 +321,8 @@ pub struct RunningNode {
     events_tx: NodeEventsSender,
     events_rx: Option<NodeEventsChannel>,
     upgrade_monitor: Option<Arc<UpgradeMonitor>>,
+    /// Bootstrap cache manager for persistent peer storage.
+    bootstrap_manager: Option<BootstrapManager>,
 }
 
 impl RunningNode {
@@ -379,6 +430,21 @@ impl RunningNode {
 
         // Run the main event loop with signal handling
         self.run_event_loop().await?;
+
+        // Log bootstrap cache stats before shutdown
+        if let Some(ref manager) = self.bootstrap_manager {
+            match manager.get_stats().await {
+                Ok(stats) => {
+                    info!(
+                        "Bootstrap cache shutdown: {} contacts, avg quality {:.2}",
+                        stats.total_contacts, stats.average_quality_score
+                    );
+                }
+                Err(e) => {
+                    debug!("Failed to get bootstrap cache stats: {}", e);
+                }
+            }
+        }
 
         // Shutdown P2P node
         info!("Shutting down P2P node...");

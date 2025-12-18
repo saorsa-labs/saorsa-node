@@ -51,7 +51,7 @@ mod probe;
 pub mod upgrade;
 
 pub use client::{DataChunk, QuantumClient, QuantumConfig, XorName};
-pub use config::NodeConfig;
+pub use config::{BootstrapCacheConfig, NodeConfig};
 pub use error::{Error, Result};
 pub use event::{NodeEvent, NodeEventsChannel};
 pub use node::{NodeBuilder, RunningNode};

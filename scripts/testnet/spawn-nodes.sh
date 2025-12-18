@@ -32,6 +32,22 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
 
     echo "Creating systemd service for node-${NODE_INDEX} (port $PORT, metrics $METRICS)"
 
+    # Determine bootstrap flags based on node index
+    # Node 0 (worker-1 bootstrap) only connects to BOOTSTRAP2 (worker-2)
+    # Node 50 (worker-2 bootstrap) only connects to BOOTSTRAP1 (worker-1)
+    # All other nodes connect to both bootstrap nodes
+    BOOTSTRAP_FLAGS=""
+    if [ "$NODE_INDEX" -eq 0 ]; then
+        # Primary bootstrap - only connect to secondary (worker-2)
+        BOOTSTRAP_FLAGS="-b ${BOOTSTRAP2}"
+    elif [ "$NODE_INDEX" -eq 50 ]; then
+        # Secondary bootstrap - only connect to primary (worker-1)
+        BOOTSTRAP_FLAGS="-b ${BOOTSTRAP1}"
+    else
+        # All other nodes connect to both bootstraps
+        BOOTSTRAP_FLAGS="-b ${BOOTSTRAP1} -b ${BOOTSTRAP2}"
+    fi
+
     cat > /etc/systemd/system/saorsa-node-${NODE_INDEX}.service <<EOF
 [Unit]
 Description=Saorsa Node ${NODE_INDEX}
@@ -44,8 +60,7 @@ ExecStart=/usr/local/bin/saorsa-node \\
     --port ${PORT} \\
     --ip-version ipv4 \\
     --network-mode testnet \\
-    -b ${BOOTSTRAP1} \\
-    -b ${BOOTSTRAP2} \\
+    ${BOOTSTRAP_FLAGS} \\
     --metrics-port ${METRICS} \\
     --log-level info \\
     --auto-upgrade \\
