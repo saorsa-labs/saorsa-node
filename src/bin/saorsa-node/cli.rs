@@ -74,7 +74,12 @@ pub struct Cli {
     /// Network mode (production, testnet, or development).
     /// Testnet mode uses relaxed IP diversity limits suitable for
     /// single-provider deployments with many nodes per IP.
-    #[arg(long, value_enum, default_value = "production", env = "SAORSA_NETWORK_MODE")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "production",
+        env = "SAORSA_NETWORK_MODE"
+    )]
     pub network_mode: CliNetworkMode,
 
     /// Path to configuration file.

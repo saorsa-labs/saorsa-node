@@ -3,7 +3,14 @@
 //! These tests connect to the live 200-node testnet for comprehensive testing.
 //! They are designed to be run via shell scripts that set environment variables.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::too_many_lines
+)]
 
 use saorsa_core::{NodeConfig as CoreNodeConfig, P2PNode};
 use sha2::{Digest, Sha256};
@@ -32,7 +39,7 @@ fn get_bootstrap_addrs() -> Vec<SocketAddr> {
 /// Create a P2P node connected to the live testnet.
 async fn create_testnet_client() -> P2PNode {
     let bootstrap_addrs = get_bootstrap_addrs();
-    println!("Connecting to testnet via: {:?}", bootstrap_addrs);
+    println!("Connecting to testnet via: {bootstrap_addrs:?}");
 
     let mut config = CoreNodeConfig::new().expect("Failed to create config");
     config.bootstrap_peers = bootstrap_addrs;
@@ -113,14 +120,14 @@ async fn run_load_test() {
         .parse()
         .expect("Invalid SAORSA_TEST_CONCURRENCY");
 
-    let addresses_file =
-        env::var("SAORSA_TEST_ADDRESSES_FILE").unwrap_or_else(|_| "chunk-addresses.txt".to_string());
+    let addresses_file = env::var("SAORSA_TEST_ADDRESSES_FILE")
+        .unwrap_or_else(|_| "chunk-addresses.txt".to_string());
 
     println!("=== Load Test Configuration ===");
-    println!("Chunk count: {}", chunk_count);
-    println!("Chunk size: {}KB", chunk_size_kb);
-    println!("Concurrency: {}", concurrency);
-    println!("Addresses file: {}", addresses_file);
+    println!("Chunk count: {chunk_count}");
+    println!("Chunk size: {chunk_size_kb}KB");
+    println!("Concurrency: {concurrency}");
+    println!("Addresses file: {addresses_file}");
     println!();
 
     let node = Arc::new(create_testnet_client().await);
@@ -135,7 +142,7 @@ async fn run_load_test() {
 
     let start_time = Instant::now();
 
-    println!("=== Storing {} chunks ===", chunk_count);
+    println!("=== Storing {chunk_count} chunks ===");
 
     let mut handles = vec![];
 
@@ -159,16 +166,16 @@ async fn run_load_test() {
                     // Write address to file
                     let hex_addr = hex::encode(address);
                     if let Ok(mut f) = file.lock() {
-                        writeln!(f, "{}", hex_addr).ok();
+                        writeln!(f, "{hex_addr}").ok();
                     }
 
                     if i % 100 == 0 {
-                        println!("Stored chunk {} / {}", i + 1, chunk_count);
+                        println!("Stored chunk {} / {chunk_count}", i + 1);
                     }
                 }
                 Err(e) => {
                     failed.fetch_add(1, Ordering::SeqCst);
-                    eprintln!("Failed to store chunk {}: {}", i, e);
+                    eprintln!("Failed to store chunk {i}: {e}");
                 }
             }
         });
@@ -187,25 +194,23 @@ async fn run_load_test() {
 
     println!();
     println!("=== Load Test Results ===");
-    println!("Duration: {:?}", duration);
-    println!("Stored: {} / {}", stored, chunk_count);
-    println!("Failed: {}", failed);
+    println!("Duration: {duration:?}");
+    println!("Stored: {stored} / {chunk_count}");
+    println!("Failed: {failed}");
     println!(
         "Throughput: {:.2} chunks/sec",
         stored as f64 / duration.as_secs_f64()
     );
-    println!("Addresses written to: {}", addresses_file);
+    println!("Addresses written to: {addresses_file}");
 
     // Cleanup
     if let Err(e) = node.shutdown().await {
-        eprintln!("Error shutting down node: {}", e);
+        eprintln!("Error shutting down node: {e}");
     }
 
     assert!(
         failed == 0,
-        "Some chunks failed to store: {} / {}",
-        failed,
-        chunk_count
+        "Some chunks failed to store: {failed} / {chunk_count}"
     );
 }
 
@@ -225,7 +230,7 @@ async fn run_verify_chunks() {
         .and_then(|s| s.parse().ok());
 
     println!("=== Chunk Verification ===");
-    println!("Addresses file: {}", addresses_file);
+    println!("Addresses file: {addresses_file}");
 
     // Read addresses from file
     let file = File::open(&addresses_file).expect("Failed to open addresses file");
@@ -247,7 +252,7 @@ async fn run_verify_chunks() {
         .collect();
 
     let total_addresses = addresses.len();
-    println!("Total addresses: {}", total_addresses);
+    println!("Total addresses: {total_addresses}");
 
     // Sample if requested
     let addresses_to_verify: Vec<XorName> = if let Some(sample) = sample_size {
@@ -260,7 +265,8 @@ async fn run_verify_chunks() {
         addresses
     };
 
-    println!("Verifying: {} chunks", addresses_to_verify.len());
+    let addresses_len = addresses_to_verify.len();
+    println!("Verifying: {addresses_len} chunks");
     println!();
 
     let node = Arc::new(create_testnet_client().await);
@@ -295,12 +301,12 @@ async fn run_verify_chunks() {
                 }
                 Err(e) => {
                     errors.fetch_add(1, Ordering::SeqCst);
-                    eprintln!("ERROR retrieving {}: {}", hex::encode(addr), e);
+                    eprintln!("ERROR retrieving {}: {e}", hex::encode(addr));
                 }
             }
 
             if (i + 1) % 100 == 0 {
-                println!("Verified {} / {}", i + 1, total);
+                println!("Verified {} / {total}", i + 1);
             }
         });
 
@@ -319,19 +325,19 @@ async fn run_verify_chunks() {
 
     println!();
     println!("=== Verification Results ===");
-    println!("Duration: {:?}", duration);
-    println!("verified: {}", verified);
-    println!("total: {}", addresses_to_verify.len());
-    println!("Missing: {}", missing);
-    println!("Errors: {}", errors);
+    println!("Duration: {duration:?}");
+    println!("verified: {verified}");
+    println!("total: {addresses_len}");
+    println!("Missing: {missing}");
+    println!("Errors: {errors}");
     println!(
         "Availability: {:.2}%",
-        (verified as f64 / addresses_to_verify.len() as f64) * 100.0
+        (verified as f64 / addresses_len as f64) * 100.0
     );
 
     // Cleanup
     if let Err(e) = node.shutdown().await {
-        eprintln!("Error shutting down node: {}", e);
+        eprintln!("Error shutting down node: {e}");
     }
 
     // Test passes if 100% available
@@ -339,10 +345,7 @@ async fn run_verify_chunks() {
         println!("PASSED: All chunks are available!");
     } else {
         panic!(
-            "FAILED: {} missing, {} errors out of {} total",
-            missing,
-            errors,
-            addresses_to_verify.len()
+            "FAILED: {missing} missing, {errors} errors out of {addresses_len} total"
         );
     }
 }
@@ -372,7 +375,7 @@ async fn run_comprehensive_data_tests() {
         let data = generate_chunk(size_kb, size_kb);
         let address = compute_address(&data);
 
-        println!("Storing {}KB chunk...", size_kb);
+        println!("Storing {size_kb}KB chunk...");
         node.dht_put(address, data.clone())
             .await
             .expect("Failed to store chunk");
@@ -380,15 +383,15 @@ async fn run_comprehensive_data_tests() {
         // Small delay to allow replication
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        println!("Retrieving {}KB chunk...", size_kb);
+        println!("Retrieving {size_kb}KB chunk...");
         let retrieved = node
             .dht_get(address)
             .await
             .expect("Failed to retrieve chunk")
             .expect("Chunk not found");
 
-        assert_eq!(data, retrieved, "Data mismatch for {}KB chunk", size_kb);
-        println!("  OK: {}KB chunk verified", size_kb);
+        assert_eq!(data, retrieved, "Data mismatch for {size_kb}KB chunk");
+        println!("  OK: {size_kb}KB chunk verified");
     }
 
     // Test 2: Concurrent storage and retrieval
@@ -416,7 +419,7 @@ async fn run_comprehensive_data_tests() {
         addresses.push(addr);
     }
 
-    println!("Stored {} chunks concurrently", concurrent_count);
+    println!("Stored {concurrent_count} chunks concurrently");
 
     // Verify all can be retrieved
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -428,27 +431,20 @@ async fn run_comprehensive_data_tests() {
         }
     }
 
-    println!(
-        "Retrieved {} / {} chunks",
-        verified,
-        addresses.len()
-    );
-    assert_eq!(
-        verified,
-        addresses.len(),
-        "Not all chunks were retrievable"
-    );
+    let addresses_len = addresses.len();
+    println!("Retrieved {verified} / {addresses_len} chunks");
+    assert_eq!(verified, addresses_len, "Not all chunks were retrievable");
 
     // Test 3: Network distribution check
     println!();
     println!("--- Test 3: Network Distribution ---");
     let peer_count = node.peer_count().await;
-    println!("Connected to {} peers", peer_count);
+    println!("Connected to {peer_count} peers");
     assert!(peer_count >= 3, "Should be connected to at least 3 peers");
 
     // Cleanup
     if let Err(e) = node.shutdown().await {
-        eprintln!("Error shutting down node: {}", e);
+        eprintln!("Error shutting down node: {e}");
     }
 
     println!();

@@ -6,12 +6,11 @@ use crate::error::{Error, Result};
 use crate::event::{create_event_channel, NodeEvent, NodeEventsChannel, NodeEventsSender};
 use crate::upgrade::{AutoApplyUpgrader, UpgradeMonitor, UpgradeResult};
 use saorsa_core::{
-    AttestationConfig as CoreAttestationConfig, BootstrapManager,
-    CacheConfig as CoreCacheConfig, EnforcementMode as CoreEnforcementMode,
+    AttestationConfig as CoreAttestationConfig, BootstrapConfig as CoreBootstrapConfig,
+    BootstrapManager, EnforcementMode as CoreEnforcementMode,
     IPDiversityConfig as CoreDiversityConfig, NodeConfig as CoreNodeConfig, P2PNode,
     ProductionConfig as CoreProductionConfig,
 };
-use std::time::Duration;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -287,16 +286,13 @@ impl NodeBuilder {
             return None;
         }
 
-        let cache_config = CoreCacheConfig {
+        let bootstrap_config = CoreBootstrapConfig {
             cache_dir,
-            max_contacts: config.bootstrap_cache.max_contacts,
-            stale_threshold: Duration::from_secs(
-                config.bootstrap_cache.stale_threshold_days * 86400,
-            ),
-            ..CoreCacheConfig::default()
+            max_peers: config.bootstrap_cache.max_contacts,
+            ..CoreBootstrapConfig::default()
         };
 
-        match BootstrapManager::with_config(cache_config).await {
+        match BootstrapManager::with_config(bootstrap_config).await {
             Ok(manager) => {
                 info!(
                     "Bootstrap cache initialized with {} max contacts",
