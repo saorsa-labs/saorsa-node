@@ -344,9 +344,7 @@ async fn run_verify_chunks() {
     if missing == 0 && errors == 0 {
         println!("PASSED: All chunks are available!");
     } else {
-        panic!(
-            "FAILED: {missing} missing, {errors} errors out of {addresses_len} total"
-        );
+        panic!("FAILED: {missing} missing, {errors} errors out of {addresses_len} total");
     }
 }
 
