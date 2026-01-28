@@ -62,13 +62,16 @@ This includes:
 
 ### ⚠️ PORT ISOLATION - MANDATORY
 
-**saorsa-node uses UDP port range 10000-10999 exclusively.**
+**Production saorsa-node instances use UDP port range 10000-10999 exclusively.**
 
 | Service | UDP Port Range | Default | Description |
 |---------|----------------|---------|-------------|
 | ant-quic | 9000-9999 | 9000 | QUIC transport layer |
 | **saorsa-node** | **10000-10999** | **10000** | Core P2P network nodes (THIS PROJECT) |
 | communitas | 11000-11999 | 11000 | Collaboration platform nodes |
+| **saorsa-node tests** | **20000-60000** | **random** | E2E test isolation (local only) |
+
+**Note:** The E2E test suite uses ports 20000-60000 with random allocation to prevent conflicts between parallel test runs and local development instances. Production deployments MUST use 10000-10999.
 
 ### 🛑 DO NOT DISTURB OTHER NETWORKS
 

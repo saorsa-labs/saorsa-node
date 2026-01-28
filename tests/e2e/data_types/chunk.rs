@@ -243,7 +243,6 @@ mod tests {
     /// Chunks have a maximum size of 4MB. Attempting to store a larger
     /// chunk should fail with an appropriate error.
     #[tokio::test]
-    #[ignore = "TODO: Size validation not yet implemented in store_chunk"]
     async fn test_chunk_reject_oversized() {
         let harness = TestHarness::setup_minimal()
             .await

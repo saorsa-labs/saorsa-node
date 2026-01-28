@@ -20,11 +20,22 @@ use tracing::{debug, info, warn};
 // =============================================================================
 // Test Isolation Constants
 // =============================================================================
+//
+// NOTE: E2E tests use a SEPARATE port range from production saorsa-node.
+//
+// - Production saorsa-node: 10000-10999 (see CLAUDE.md)
+// - E2E tests: 20000-60000 (this file)
+//
+// This separation prevents test conflicts with:
+// 1. Running local development nodes (which use 10000-10999)
+// 2. Parallel test execution (via random port allocation)
+// 3. Other Saorsa services (ant-quic: 9000-9999, communitas: 11000-11999)
 
-/// Minimum port for random allocation (avoids well-known ports).
+/// Minimum port for random test allocation.
+/// Avoids well-known ports, production ranges, and other Saorsa services.
 pub const TEST_PORT_RANGE_MIN: u16 = 20_000;
 
-/// Maximum port for random allocation.
+/// Maximum port for random test allocation.
 pub const TEST_PORT_RANGE_MAX: u16 = 60_000;
 
 /// Maximum nodes supported in a test network.
@@ -306,8 +317,19 @@ impl TestNode {
     ///
     /// # Errors
     ///
-    /// Returns an error if the node is not running, storage fails, or operation times out.
+    /// Returns an error if the node is not running, chunk exceeds max size,
+    /// storage fails, or operation times out.
     pub async fn store_chunk(&self, data: &[u8]) -> Result<XorName> {
+        // Validate chunk size (max 4MB)
+        const MAX_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+        if data.len() > MAX_CHUNK_SIZE {
+            return Err(TestnetError::Storage(format!(
+                "Chunk size {} exceeds maximum {} bytes",
+                data.len(),
+                MAX_CHUNK_SIZE
+            )));
+        }
+
         let node = self.p2p_node.as_ref().ok_or(TestnetError::NodeNotRunning)?;
 
         // Compute content address (SHA256 hash)
