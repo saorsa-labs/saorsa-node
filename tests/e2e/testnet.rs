@@ -4,6 +4,7 @@
 //! of 25 saorsa nodes for E2E testing.
 
 use bytes::Bytes;
+use rand::Rng;
 use saorsa_core::{NodeConfig as CoreNodeConfig, P2PNode};
 use saorsa_node::client::{DataChunk, XorName};
 use sha2::{Digest, Sha256};
@@ -15,6 +16,72 @@ use tokio::sync::{broadcast, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
+
+// =============================================================================
+// Test Isolation Constants
+// =============================================================================
+//
+// NOTE: E2E tests use a SEPARATE port range from production saorsa-node.
+//
+// - Production saorsa-node: 10000-10999 (see CLAUDE.md)
+// - E2E tests: 20000-60000 (this file)
+//
+// This separation prevents test conflicts with:
+// 1. Running local development nodes (which use 10000-10999)
+// 2. Parallel test execution (via random port allocation)
+// 3. Other Saorsa services (ant-quic: 9000-9999, communitas: 11000-11999)
+
+/// Minimum port for random test allocation.
+/// Avoids well-known ports, production ranges, and other Saorsa services.
+pub const TEST_PORT_RANGE_MIN: u16 = 20_000;
+
+/// Maximum port for random test allocation.
+pub const TEST_PORT_RANGE_MAX: u16 = 60_000;
+
+/// Maximum nodes supported in a test network.
+/// Limited to ensure port calculations don't overflow u16.
+pub const MAX_TEST_NODE_COUNT: usize = 1000;
+
+// =============================================================================
+// Default Timing Constants
+// =============================================================================
+
+/// Default delay between spawning nodes (milliseconds).
+const DEFAULT_SPAWN_DELAY_MS: u64 = 200;
+
+/// Default timeout for network stabilization (seconds).
+const DEFAULT_STABILIZATION_TIMEOUT_SECS: u64 = 120;
+
+/// Default timeout for single node startup (seconds).
+const DEFAULT_NODE_STARTUP_TIMEOUT_SECS: u64 = 30;
+
+/// Stabilization timeout for minimal network (seconds).
+const MINIMAL_STABILIZATION_TIMEOUT_SECS: u64 = 30;
+
+/// Stabilization timeout for small network (seconds).
+const SMALL_STABILIZATION_TIMEOUT_SECS: u64 = 60;
+
+/// Default timeout for chunk operations (seconds).
+const DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS: u64 = 30;
+
+// =============================================================================
+// Default Node Counts
+// =============================================================================
+
+/// Default number of nodes in a full test network.
+pub const DEFAULT_NODE_COUNT: usize = 25;
+
+/// Default number of bootstrap nodes.
+pub const DEFAULT_BOOTSTRAP_COUNT: usize = 3;
+
+/// Number of nodes in a minimal test network.
+pub const MINIMAL_NODE_COUNT: usize = 5;
+
+/// Number of bootstrap nodes in a minimal network.
+pub const MINIMAL_BOOTSTRAP_COUNT: usize = 2;
+
+/// Number of nodes in a small test network.
+pub const SMALL_NODE_COUNT: usize = 10;
 
 /// Error type for testnet operations.
 #[derive(Debug, thiserror::Error)]
@@ -60,18 +127,21 @@ pub enum TestnetError {
 pub type Result<T> = std::result::Result<T, TestnetError>;
 
 /// Configuration for the test network.
+///
+/// Each configuration is automatically isolated with unique ports and
+/// data directories to prevent test pollution when running in parallel.
 #[derive(Debug, Clone)]
 pub struct TestNetworkConfig {
     /// Number of nodes to spawn (default: 25).
     pub node_count: usize,
 
-    /// Base port for node allocation (default: 19000).
+    /// Base port for node allocation (auto-generated for isolation).
     pub base_port: u16,
 
     /// Number of bootstrap nodes (first N nodes, default: 3).
     pub bootstrap_count: usize,
 
-    /// Root directory for test data.
+    /// Root directory for test data (auto-generated for isolation).
     pub test_data_dir: PathBuf,
 
     /// Delay between node spawns (default: 200ms).
@@ -89,14 +159,27 @@ pub struct TestNetworkConfig {
 
 impl Default for TestNetworkConfig {
     fn default() -> Self {
+        let mut rng = rand::thread_rng();
+
+        // Random port in isolated range to avoid collisions in parallel tests.
+        // Ensure we have room for DEFAULT_NODE_COUNT consecutive ports.
+        // Safety: DEFAULT_NODE_COUNT (25) fits in u16.
+        #[allow(clippy::cast_possible_truncation)]
+        let max_base_port = TEST_PORT_RANGE_MAX.saturating_sub(DEFAULT_NODE_COUNT as u16);
+        let base_port = rng.gen_range(TEST_PORT_RANGE_MIN..max_base_port);
+
+        // Random suffix for unique temp directory
+        let suffix: u64 = rng.gen();
+        let test_data_dir = std::env::temp_dir().join(format!("saorsa_test_{suffix:x}"));
+
         Self {
-            node_count: 25,
-            base_port: 19000,
-            bootstrap_count: 3,
-            test_data_dir: std::env::temp_dir().join("saorsa_testnet"),
-            spawn_delay: Duration::from_millis(200),
-            stabilization_timeout: Duration::from_secs(120),
-            node_startup_timeout: Duration::from_secs(30),
+            node_count: DEFAULT_NODE_COUNT,
+            base_port,
+            bootstrap_count: DEFAULT_BOOTSTRAP_COUNT,
+            test_data_dir,
+            spawn_delay: Duration::from_millis(DEFAULT_SPAWN_DELAY_MS),
+            stabilization_timeout: Duration::from_secs(DEFAULT_STABILIZATION_TIMEOUT_SECS),
+            node_startup_timeout: Duration::from_secs(DEFAULT_NODE_STARTUP_TIMEOUT_SECS),
             enable_node_logging: false,
         }
     }
@@ -107,9 +190,9 @@ impl TestNetworkConfig {
     #[must_use]
     pub fn minimal() -> Self {
         Self {
-            node_count: 5,
-            bootstrap_count: 2,
-            stabilization_timeout: Duration::from_secs(30),
+            node_count: MINIMAL_NODE_COUNT,
+            bootstrap_count: MINIMAL_BOOTSTRAP_COUNT,
+            stabilization_timeout: Duration::from_secs(MINIMAL_STABILIZATION_TIMEOUT_SECS),
             ..Default::default()
         }
     }
@@ -118,9 +201,9 @@ impl TestNetworkConfig {
     #[must_use]
     pub fn small() -> Self {
         Self {
-            node_count: 10,
-            bootstrap_count: 3,
-            stabilization_timeout: Duration::from_secs(60),
+            node_count: SMALL_NODE_COUNT,
+            bootstrap_count: DEFAULT_BOOTSTRAP_COUNT,
+            stabilization_timeout: Duration::from_secs(SMALL_STABILIZATION_TIMEOUT_SECS),
             ..Default::default()
         }
     }
@@ -234,16 +317,33 @@ impl TestNode {
     ///
     /// # Errors
     ///
-    /// Returns an error if the node is not running or storage fails.
+    /// Returns an error if the node is not running, chunk exceeds max size,
+    /// storage fails, or operation times out.
     pub async fn store_chunk(&self, data: &[u8]) -> Result<XorName> {
+        // Validate chunk size (max 4MB)
+        const MAX_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+        if data.len() > MAX_CHUNK_SIZE {
+            return Err(TestnetError::Storage(format!(
+                "Chunk size {} exceeds maximum {} bytes",
+                data.len(),
+                MAX_CHUNK_SIZE
+            )));
+        }
+
         let node = self.p2p_node.as_ref().ok_or(TestnetError::NodeNotRunning)?;
 
         // Compute content address (SHA256 hash)
         let address = Self::compute_chunk_address(data);
 
-        // Store in DHT
-        node.dht_put(address, data.to_vec())
+        // Store in DHT with timeout
+        let timeout = Duration::from_secs(DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS);
+        tokio::time::timeout(timeout, node.dht_put(address, data.to_vec()))
             .await
+            .map_err(|_| {
+                TestnetError::Storage(format!(
+                    "Timeout storing chunk after {DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS}s"
+                ))
+            })?
             .map_err(|e| TestnetError::Storage(format!("Failed to store chunk: {e}")))?;
 
         debug!(
@@ -258,11 +358,20 @@ impl TestNode {
     ///
     /// # Errors
     ///
-    /// Returns an error if the node is not running or retrieval fails.
+    /// Returns an error if the node is not running, retrieval fails, or operation times out.
     pub async fn get_chunk(&self, address: &XorName) -> Result<Option<DataChunk>> {
         let node = self.p2p_node.as_ref().ok_or(TestnetError::NodeNotRunning)?;
 
-        match node.dht_get(*address).await {
+        let timeout = Duration::from_secs(DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS);
+        let result = tokio::time::timeout(timeout, node.dht_get(*address))
+            .await
+            .map_err(|_| {
+                TestnetError::Retrieval(format!(
+                    "Timeout retrieving chunk after {DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS}s"
+                ))
+            })?;
+
+        match result {
             Ok(Some(data)) => {
                 let chunk = DataChunk::new(*address, Bytes::from(data));
                 Ok(Some(chunk))
@@ -323,6 +432,33 @@ impl TestNetwork {
             return Err(TestnetError::Config(
                 "At least one bootstrap node is required".to_string(),
             ));
+        }
+
+        // Validate node count fits in u16 for port calculations
+        if config.node_count > MAX_TEST_NODE_COUNT {
+            return Err(TestnetError::Config(format!(
+                "Node count {} exceeds maximum {}",
+                config.node_count, MAX_TEST_NODE_COUNT
+            )));
+        }
+
+        // Validate port range doesn't overflow
+        let node_count_u16 = u16::try_from(config.node_count).map_err(|_| {
+            TestnetError::Config(format!("Node count {} exceeds u16::MAX", config.node_count))
+        })?;
+        let max_port = config
+            .base_port
+            .checked_add(node_count_u16)
+            .ok_or_else(|| {
+                TestnetError::Config(format!(
+                    "Port range overflow: base_port {} + node_count {} exceeds u16::MAX",
+                    config.base_port, config.node_count
+                ))
+            })?;
+        if max_port > TEST_PORT_RANGE_MAX {
+            return Err(TestnetError::Config(format!(
+                "Port range overflow: max port {max_port} exceeds TEST_PORT_RANGE_MAX {TEST_PORT_RANGE_MAX}"
+            )));
         }
 
         // Ensure test data directory exists
@@ -446,7 +582,10 @@ impl TestNetwork {
         is_bootstrap: bool,
         bootstrap_addrs: Vec<SocketAddr>,
     ) -> Result<TestNode> {
-        let port = self.config.base_port + u16::try_from(index).unwrap_or(0);
+        // Safe: node_count is validated in TestNetwork::new() to fit in u16
+        let index_u16 = u16::try_from(index)
+            .map_err(|_| TestnetError::Config(format!("Node index {index} exceeds u16::MAX")))?;
+        let port = self.config.base_port + index_u16;
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
         let node_id = format!("test_node_{index}");
         let data_dir = self.config.test_data_dir.join(&node_id);
@@ -477,6 +616,7 @@ impl TestNetwork {
 
         core_config.listen_addr = node.address;
         core_config.listen_addrs = vec![node.address];
+        core_config.enable_ipv6 = false; // Disable IPv6 for local testing to avoid dual-stack binding issues
         core_config
             .bootstrap_peers
             .clone_from(&node.bootstrap_addrs);
@@ -714,8 +854,14 @@ mod tests {
     fn test_config_defaults() {
         let config = TestNetworkConfig::default();
         assert_eq!(config.node_count, 25);
-        assert_eq!(config.base_port, 19000);
         assert_eq!(config.bootstrap_count, 3);
+        // Port is randomly generated in range 20000-60000
+        assert!(config.base_port >= 20000 && config.base_port < 60000);
+        // Data dir has unique suffix
+        assert!(config
+            .test_data_dir
+            .to_string_lossy()
+            .contains("saorsa_test_"));
     }
 
     #[test]
@@ -723,6 +869,16 @@ mod tests {
         let config = TestNetworkConfig::minimal();
         assert_eq!(config.node_count, 5);
         assert_eq!(config.bootstrap_count, 2);
+    }
+
+    #[test]
+    fn test_config_isolation() {
+        // Each config should get unique port and data dir
+        let config1 = TestNetworkConfig::default();
+        let config2 = TestNetworkConfig::default();
+
+        // Data directories must be unique
+        assert_ne!(config1.test_data_dir, config2.test_data_dir);
     }
 
     #[test]
