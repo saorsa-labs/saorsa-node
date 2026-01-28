@@ -4,6 +4,7 @@
 //! of 25 saorsa nodes for E2E testing.
 
 use bytes::Bytes;
+use rand::Rng;
 use saorsa_core::{NodeConfig as CoreNodeConfig, P2PNode};
 use saorsa_node::client::{DataChunk, XorName};
 use sha2::{Digest, Sha256};
@@ -15,6 +16,54 @@ use tokio::sync::{broadcast, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
+
+// =============================================================================
+// Test Isolation Constants
+// =============================================================================
+
+/// Minimum port for random allocation (avoids well-known ports).
+pub const TEST_PORT_RANGE_MIN: u16 = 20_000;
+
+/// Maximum port for random allocation.
+pub const TEST_PORT_RANGE_MAX: u16 = 60_000;
+
+// =============================================================================
+// Default Timing Constants
+// =============================================================================
+
+/// Default delay between spawning nodes (milliseconds).
+const DEFAULT_SPAWN_DELAY_MS: u64 = 200;
+
+/// Default timeout for network stabilization (seconds).
+const DEFAULT_STABILIZATION_TIMEOUT_SECS: u64 = 120;
+
+/// Default timeout for single node startup (seconds).
+const DEFAULT_NODE_STARTUP_TIMEOUT_SECS: u64 = 30;
+
+/// Stabilization timeout for minimal network (seconds).
+const MINIMAL_STABILIZATION_TIMEOUT_SECS: u64 = 30;
+
+/// Stabilization timeout for small network (seconds).
+const SMALL_STABILIZATION_TIMEOUT_SECS: u64 = 60;
+
+// =============================================================================
+// Default Node Counts
+// =============================================================================
+
+/// Default number of nodes in a full test network.
+pub const DEFAULT_NODE_COUNT: usize = 25;
+
+/// Default number of bootstrap nodes.
+pub const DEFAULT_BOOTSTRAP_COUNT: usize = 3;
+
+/// Number of nodes in a minimal test network.
+pub const MINIMAL_NODE_COUNT: usize = 5;
+
+/// Number of bootstrap nodes in a minimal network.
+pub const MINIMAL_BOOTSTRAP_COUNT: usize = 2;
+
+/// Number of nodes in a small test network.
+pub const SMALL_NODE_COUNT: usize = 10;
 
 /// Error type for testnet operations.
 #[derive(Debug, thiserror::Error)]
@@ -60,18 +109,21 @@ pub enum TestnetError {
 pub type Result<T> = std::result::Result<T, TestnetError>;
 
 /// Configuration for the test network.
+///
+/// Each configuration is automatically isolated with unique ports and
+/// data directories to prevent test pollution when running in parallel.
 #[derive(Debug, Clone)]
 pub struct TestNetworkConfig {
     /// Number of nodes to spawn (default: 25).
     pub node_count: usize,
 
-    /// Base port for node allocation (default: 19000).
+    /// Base port for node allocation (auto-generated for isolation).
     pub base_port: u16,
 
     /// Number of bootstrap nodes (first N nodes, default: 3).
     pub bootstrap_count: usize,
 
-    /// Root directory for test data.
+    /// Root directory for test data (auto-generated for isolation).
     pub test_data_dir: PathBuf,
 
     /// Delay between node spawns (default: 200ms).
@@ -89,14 +141,24 @@ pub struct TestNetworkConfig {
 
 impl Default for TestNetworkConfig {
     fn default() -> Self {
+        let mut rng = rand::thread_rng();
+
+        // Random port in isolated range to avoid collisions in parallel tests.
+        // Each test uses up to 100 consecutive ports for its nodes.
+        let base_port = rng.gen_range(TEST_PORT_RANGE_MIN..TEST_PORT_RANGE_MAX);
+
+        // Random suffix for unique temp directory
+        let suffix: u64 = rng.gen();
+        let test_data_dir = std::env::temp_dir().join(format!("saorsa_test_{suffix:x}"));
+
         Self {
-            node_count: 25,
-            base_port: 19000,
-            bootstrap_count: 3,
-            test_data_dir: std::env::temp_dir().join("saorsa_testnet"),
-            spawn_delay: Duration::from_millis(200),
-            stabilization_timeout: Duration::from_secs(120),
-            node_startup_timeout: Duration::from_secs(30),
+            node_count: DEFAULT_NODE_COUNT,
+            base_port,
+            bootstrap_count: DEFAULT_BOOTSTRAP_COUNT,
+            test_data_dir,
+            spawn_delay: Duration::from_millis(DEFAULT_SPAWN_DELAY_MS),
+            stabilization_timeout: Duration::from_secs(DEFAULT_STABILIZATION_TIMEOUT_SECS),
+            node_startup_timeout: Duration::from_secs(DEFAULT_NODE_STARTUP_TIMEOUT_SECS),
             enable_node_logging: false,
         }
     }
@@ -107,9 +169,9 @@ impl TestNetworkConfig {
     #[must_use]
     pub fn minimal() -> Self {
         Self {
-            node_count: 5,
-            bootstrap_count: 2,
-            stabilization_timeout: Duration::from_secs(30),
+            node_count: MINIMAL_NODE_COUNT,
+            bootstrap_count: MINIMAL_BOOTSTRAP_COUNT,
+            stabilization_timeout: Duration::from_secs(MINIMAL_STABILIZATION_TIMEOUT_SECS),
             ..Default::default()
         }
     }
@@ -118,9 +180,9 @@ impl TestNetworkConfig {
     #[must_use]
     pub fn small() -> Self {
         Self {
-            node_count: 10,
-            bootstrap_count: 3,
-            stabilization_timeout: Duration::from_secs(60),
+            node_count: SMALL_NODE_COUNT,
+            bootstrap_count: DEFAULT_BOOTSTRAP_COUNT,
+            stabilization_timeout: Duration::from_secs(SMALL_STABILIZATION_TIMEOUT_SECS),
             ..Default::default()
         }
     }
@@ -477,6 +539,7 @@ impl TestNetwork {
 
         core_config.listen_addr = node.address;
         core_config.listen_addrs = vec![node.address];
+        core_config.enable_ipv6 = false; // Disable IPv6 for local testing to avoid dual-stack binding issues
         core_config
             .bootstrap_peers
             .clone_from(&node.bootstrap_addrs);
@@ -714,8 +777,14 @@ mod tests {
     fn test_config_defaults() {
         let config = TestNetworkConfig::default();
         assert_eq!(config.node_count, 25);
-        assert_eq!(config.base_port, 19000);
         assert_eq!(config.bootstrap_count, 3);
+        // Port is randomly generated in range 20000-60000
+        assert!(config.base_port >= 20000 && config.base_port < 60000);
+        // Data dir has unique suffix
+        assert!(config
+            .test_data_dir
+            .to_string_lossy()
+            .contains("saorsa_test_"));
     }
 
     #[test]
@@ -723,6 +792,16 @@ mod tests {
         let config = TestNetworkConfig::minimal();
         assert_eq!(config.node_count, 5);
         assert_eq!(config.bootstrap_count, 2);
+    }
+
+    #[test]
+    fn test_config_isolation() {
+        // Each config should get unique port and data dir
+        let config1 = TestNetworkConfig::default();
+        let config2 = TestNetworkConfig::default();
+
+        // Data directories must be unique
+        assert_ne!(config1.test_data_dir, config2.test_data_dir);
     }
 
     #[test]

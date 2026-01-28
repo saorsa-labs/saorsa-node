@@ -4,6 +4,10 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use super::testnet::{
+    DEFAULT_BOOTSTRAP_COUNT, DEFAULT_NODE_COUNT, MINIMAL_BOOTSTRAP_COUNT, MINIMAL_NODE_COUNT,
+    SMALL_NODE_COUNT, TEST_PORT_RANGE_MAX, TEST_PORT_RANGE_MIN,
+};
 use super::{NetworkState, TestHarness, TestNetwork, TestNetworkConfig};
 use std::time::Duration;
 
@@ -11,18 +15,14 @@ use std::time::Duration;
 #[tokio::test]
 #[ignore = "Requires real P2P node spawning - run with --ignored"]
 async fn test_minimal_network_formation() {
-    // Use unique port range to avoid conflicts with parallel tests
-    let config = TestNetworkConfig {
-        base_port: 19200, // Different from other tests
-        ..TestNetworkConfig::minimal()
-    };
-    let harness = TestHarness::setup_with_config(config)
+    // TestNetworkConfig automatically generates unique ports and data dirs
+    let harness = TestHarness::setup_minimal()
         .await
         .expect("Failed to setup harness");
 
     // Verify network is ready
     assert!(harness.is_ready().await);
-    assert_eq!(harness.node_count(), 5);
+    assert_eq!(harness.node_count(), MINIMAL_NODE_COUNT);
 
     // Verify we have connections
     let total_connections = harness.total_connections().await;
@@ -39,21 +39,17 @@ async fn test_minimal_network_formation() {
 #[tokio::test]
 #[ignore = "Requires real P2P node spawning - run with --ignored"]
 async fn test_small_network_formation() {
-    // Use unique port range to avoid conflicts with parallel tests
-    let config = TestNetworkConfig {
-        base_port: 19300, // Different from other tests
-        ..TestNetworkConfig::small()
-    };
-    let harness = TestHarness::setup_with_config(config)
+    // TestNetworkConfig automatically generates unique ports and data dirs
+    let harness = TestHarness::setup_small()
         .await
         .expect("Failed to setup harness");
 
     // Verify network is ready
     assert!(harness.is_ready().await);
-    assert_eq!(harness.node_count(), 10);
+    assert_eq!(harness.node_count(), SMALL_NODE_COUNT);
 
     // Verify all nodes are accessible
-    for i in 0..10 {
+    for i in 0..SMALL_NODE_COUNT {
         assert!(harness.node(i).is_some(), "Node {i} should be accessible");
     }
 
@@ -69,14 +65,15 @@ async fn test_full_network_formation() {
 
     // Verify network is ready
     assert!(harness.is_ready().await);
-    assert_eq!(harness.node_count(), 25);
+    assert_eq!(harness.node_count(), DEFAULT_NODE_COUNT);
 
     // Verify bootstrap nodes
     let network = harness.network();
-    assert_eq!(network.bootstrap_nodes().len(), 3);
+    assert_eq!(network.bootstrap_nodes().len(), DEFAULT_BOOTSTRAP_COUNT);
 
     // Verify regular nodes
-    assert_eq!(network.regular_nodes().len(), 22);
+    let expected_regular = DEFAULT_NODE_COUNT - DEFAULT_BOOTSTRAP_COUNT;
+    assert_eq!(network.regular_nodes().len(), expected_regular);
 
     // Verify we can get random nodes
     assert!(harness.random_node().is_some());
@@ -90,10 +87,10 @@ async fn test_full_network_formation() {
 #[tokio::test]
 #[ignore = "Requires real P2P node spawning - run with --ignored"]
 async fn test_custom_network_config() {
+    // Override only the settings we care about; ports and data dir are auto-generated
     let config = TestNetworkConfig {
         node_count: 7,
         bootstrap_count: 2,
-        base_port: 19100,
         spawn_delay: Duration::from_millis(100),
         stabilization_timeout: Duration::from_secs(60),
         ..Default::default()
@@ -114,12 +111,8 @@ async fn test_custom_network_config() {
 #[tokio::test]
 #[ignore = "Requires real P2P node spawning and Anvil - run with --ignored"]
 async fn test_network_with_evm() {
-    // Use unique port range to avoid conflicts with parallel tests
-    let config = TestNetworkConfig {
-        base_port: 19400, // Different from other tests
-        ..TestNetworkConfig::default()
-    };
-    let harness = TestHarness::setup_with_evm_and_config(config)
+    // TestNetworkConfig automatically generates unique ports and data dirs
+    let harness = TestHarness::setup_with_evm()
         .await
         .expect("Failed to setup harness with EVM");
 
@@ -174,14 +167,20 @@ fn test_network_state() {
 #[test]
 fn test_config_presets() {
     let default = TestNetworkConfig::default();
-    assert_eq!(default.node_count, 25);
-    assert_eq!(default.bootstrap_count, 3);
+    assert_eq!(default.node_count, DEFAULT_NODE_COUNT);
+    assert_eq!(default.bootstrap_count, DEFAULT_BOOTSTRAP_COUNT);
+    // Ports are randomly generated in a wide range to avoid collisions
+    assert!(default.base_port >= TEST_PORT_RANGE_MIN && default.base_port < TEST_PORT_RANGE_MAX);
 
     let minimal = TestNetworkConfig::minimal();
-    assert_eq!(minimal.node_count, 5);
-    assert_eq!(minimal.bootstrap_count, 2);
+    assert_eq!(minimal.node_count, MINIMAL_NODE_COUNT);
+    assert_eq!(minimal.bootstrap_count, MINIMAL_BOOTSTRAP_COUNT);
 
     let small = TestNetworkConfig::small();
-    assert_eq!(small.node_count, 10);
-    assert_eq!(small.bootstrap_count, 3);
+    assert_eq!(small.node_count, SMALL_NODE_COUNT);
+    assert_eq!(small.bootstrap_count, DEFAULT_BOOTSTRAP_COUNT);
+
+    // Each config should have a unique data directory
+    assert_ne!(default.test_data_dir, minimal.test_data_dir);
+    assert_ne!(minimal.test_data_dir, small.test_data_dir);
 }
