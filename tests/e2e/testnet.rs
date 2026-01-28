@@ -27,6 +27,10 @@ pub const TEST_PORT_RANGE_MIN: u16 = 20_000;
 /// Maximum port for random allocation.
 pub const TEST_PORT_RANGE_MAX: u16 = 60_000;
 
+/// Maximum nodes supported in a test network.
+/// Limited to ensure port calculations don't overflow u16.
+pub const MAX_TEST_NODE_COUNT: usize = 1000;
+
 // =============================================================================
 // Default Timing Constants
 // =============================================================================
@@ -45,6 +49,9 @@ const MINIMAL_STABILIZATION_TIMEOUT_SECS: u64 = 30;
 
 /// Stabilization timeout for small network (seconds).
 const SMALL_STABILIZATION_TIMEOUT_SECS: u64 = 60;
+
+/// Default timeout for chunk operations (seconds).
+const DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS: u64 = 30;
 
 // =============================================================================
 // Default Node Counts
@@ -144,8 +151,11 @@ impl Default for TestNetworkConfig {
         let mut rng = rand::thread_rng();
 
         // Random port in isolated range to avoid collisions in parallel tests.
-        // Each test uses up to 100 consecutive ports for its nodes.
-        let base_port = rng.gen_range(TEST_PORT_RANGE_MIN..TEST_PORT_RANGE_MAX);
+        // Ensure we have room for DEFAULT_NODE_COUNT consecutive ports.
+        // Safety: DEFAULT_NODE_COUNT (25) fits in u16.
+        #[allow(clippy::cast_possible_truncation)]
+        let max_base_port = TEST_PORT_RANGE_MAX.saturating_sub(DEFAULT_NODE_COUNT as u16);
+        let base_port = rng.gen_range(TEST_PORT_RANGE_MIN..max_base_port);
 
         // Random suffix for unique temp directory
         let suffix: u64 = rng.gen();
@@ -296,16 +306,22 @@ impl TestNode {
     ///
     /// # Errors
     ///
-    /// Returns an error if the node is not running or storage fails.
+    /// Returns an error if the node is not running, storage fails, or operation times out.
     pub async fn store_chunk(&self, data: &[u8]) -> Result<XorName> {
         let node = self.p2p_node.as_ref().ok_or(TestnetError::NodeNotRunning)?;
 
         // Compute content address (SHA256 hash)
         let address = Self::compute_chunk_address(data);
 
-        // Store in DHT
-        node.dht_put(address, data.to_vec())
+        // Store in DHT with timeout
+        let timeout = Duration::from_secs(DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS);
+        tokio::time::timeout(timeout, node.dht_put(address, data.to_vec()))
             .await
+            .map_err(|_| {
+                TestnetError::Storage(format!(
+                    "Timeout storing chunk after {DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS}s"
+                ))
+            })?
             .map_err(|e| TestnetError::Storage(format!("Failed to store chunk: {e}")))?;
 
         debug!(
@@ -320,11 +336,20 @@ impl TestNode {
     ///
     /// # Errors
     ///
-    /// Returns an error if the node is not running or retrieval fails.
+    /// Returns an error if the node is not running, retrieval fails, or operation times out.
     pub async fn get_chunk(&self, address: &XorName) -> Result<Option<DataChunk>> {
         let node = self.p2p_node.as_ref().ok_or(TestnetError::NodeNotRunning)?;
 
-        match node.dht_get(*address).await {
+        let timeout = Duration::from_secs(DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS);
+        let result = tokio::time::timeout(timeout, node.dht_get(*address))
+            .await
+            .map_err(|_| {
+                TestnetError::Retrieval(format!(
+                    "Timeout retrieving chunk after {DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS}s"
+                ))
+            })?;
+
+        match result {
             Ok(Some(data)) => {
                 let chunk = DataChunk::new(*address, Bytes::from(data));
                 Ok(Some(chunk))
@@ -385,6 +410,33 @@ impl TestNetwork {
             return Err(TestnetError::Config(
                 "At least one bootstrap node is required".to_string(),
             ));
+        }
+
+        // Validate node count fits in u16 for port calculations
+        if config.node_count > MAX_TEST_NODE_COUNT {
+            return Err(TestnetError::Config(format!(
+                "Node count {} exceeds maximum {}",
+                config.node_count, MAX_TEST_NODE_COUNT
+            )));
+        }
+
+        // Validate port range doesn't overflow
+        let node_count_u16 = u16::try_from(config.node_count).map_err(|_| {
+            TestnetError::Config(format!("Node count {} exceeds u16::MAX", config.node_count))
+        })?;
+        let max_port = config
+            .base_port
+            .checked_add(node_count_u16)
+            .ok_or_else(|| {
+                TestnetError::Config(format!(
+                    "Port range overflow: base_port {} + node_count {} exceeds u16::MAX",
+                    config.base_port, config.node_count
+                ))
+            })?;
+        if max_port > TEST_PORT_RANGE_MAX {
+            return Err(TestnetError::Config(format!(
+                "Port range overflow: max port {max_port} exceeds TEST_PORT_RANGE_MAX {TEST_PORT_RANGE_MAX}"
+            )));
         }
 
         // Ensure test data directory exists
@@ -508,7 +560,10 @@ impl TestNetwork {
         is_bootstrap: bool,
         bootstrap_addrs: Vec<SocketAddr>,
     ) -> Result<TestNode> {
-        let port = self.config.base_port + u16::try_from(index).unwrap_or(0);
+        // Safe: node_count is validated in TestNetwork::new() to fit in u16
+        let index_u16 = u16::try_from(index)
+            .map_err(|_| TestnetError::Config(format!("Node index {index} exceeds u16::MAX")))?;
+        let port = self.config.base_port + index_u16;
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
         let node_id = format!("test_node_{index}");
         let data_dir = self.config.test_data_dir.join(&node_id);
