@@ -25,7 +25,29 @@ jobs:
       id-token: write
       actions: read # Required for Claude to read CI results on PRs
     steps:
+      # Get PR details for fork detection
+      - name: Get PR details
+        id: pr-details
+        if: github.event.issue.pull_request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_DATA=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.issue.number }})
+          echo "head_repo=$(echo "$PR_DATA" | jq -r '.head.repo.full_name')" >> $GITHUB_OUTPUT
+          echo "head_ref=$(echo "$PR_DATA" | jq -r '.head.ref')" >> $GITHUB_OUTPUT
+          echo "is_fork=$(echo "$PR_DATA" | jq -r '.head.repo.fork')" >> $GITHUB_OUTPUT
+
+      # Checkout for fork PRs using PR ref
+      - name: Checkout fork PR
+        if: github.event.issue.pull_request && steps.pr-details.outputs.is_fork == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
+          fetch-depth: 20
+
+      # Checkout for non-fork PRs and issues
       - name: Checkout repository
+        if: "!github.event.issue.pull_request || steps.pr-details.outputs.is_fork != 'true'"
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -35,6 +57,9 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # Allow external contributors without write access (for fork PRs)
+          allowed_non_write_users: "*"
 
           # This is an optional setting that allows Claude to read CI results on PRs
           additional_permissions: |

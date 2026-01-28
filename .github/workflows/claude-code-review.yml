@@ -1,7 +1,8 @@
 name: Claude Code Review
 
 on:
-  pull_request:
+  # Use pull_request_target to support fork PRs (has access to secrets)
+  pull_request_target:
     types: [opened, synchronize, ready_for_review, reopened]
     # Optional: Only run on specific file changes
     # paths:
@@ -26,16 +27,22 @@ jobs:
       id-token: write
 
     steps:
-      - name: Checkout repository
+      # Checkout the PR head (fork or same-repo) using PR ref for security
+      - name: Checkout PR
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+          fetch-depth: 20
 
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # Allow external contributors without write access (for fork PRs)
+          allowed_non_write_users: "*"
+
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
