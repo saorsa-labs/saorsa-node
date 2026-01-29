@@ -130,6 +130,10 @@ pub struct NodeConfig {
     #[serde(default)]
     pub bootstrap_cache: BootstrapCacheConfig,
 
+    /// Storage configuration for chunk persistence.
+    #[serde(default)]
+    pub storage: StorageConfig,
+
     /// Log level.
     #[serde(default = "default_log_level")]
     pub log_level: String,
@@ -364,6 +368,7 @@ impl Default for NodeConfig {
             payment: PaymentConfig::default(),
             attestation: AttestationNodeConfig::default(),
             bootstrap_cache: BootstrapCacheConfig::default(),
+            storage: StorageConfig::default(),
             log_level: default_log_level(),
         }
     }
@@ -521,6 +526,52 @@ const fn default_bootstrap_max_contacts() -> usize {
 
 const fn default_bootstrap_stale_days() -> u64 {
     7
+}
+
+// ============================================================================
+// Storage Configuration
+// ============================================================================
+
+/// Storage configuration for chunk persistence.
+///
+/// Controls how chunks are stored on disk, including:
+/// - Whether storage is enabled
+/// - Maximum chunks to store (for capacity management)
+/// - Content verification on read
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfig {
+    /// Enable chunk storage.
+    /// Default: true
+    #[serde(default = "default_storage_enabled")]
+    pub enabled: bool,
+
+    /// Maximum number of chunks to store (0 = unlimited).
+    /// Default: 0 (unlimited)
+    #[serde(default)]
+    pub max_chunks: usize,
+
+    /// Verify content hash matches address on read.
+    /// Default: true
+    #[serde(default = "default_storage_verify_on_read")]
+    pub verify_on_read: bool,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_storage_enabled(),
+            max_chunks: 0,
+            verify_on_read: default_storage_verify_on_read(),
+        }
+    }
+}
+
+const fn default_storage_enabled() -> bool {
+    true
+}
+
+const fn default_storage_verify_on_read() -> bool {
+    true
 }
 
 /// Default testnet bootstrap nodes.

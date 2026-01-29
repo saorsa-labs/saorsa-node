@@ -37,8 +37,8 @@ pub mod quote;
 mod verifier;
 pub mod wallet;
 
-pub use cache::VerifiedCache;
+pub use cache::{CacheStats, VerifiedCache};
 pub use metrics::QuotingMetricsTracker;
 pub use quote::{verify_quote_content, QuoteGenerator, XorName};
-pub use verifier::{PaymentStatus, PaymentVerifier, PaymentVerifierConfig};
+pub use verifier::{EvmVerifierConfig, PaymentStatus, PaymentVerifier, PaymentVerifierConfig};
 pub use wallet::{is_valid_address, parse_rewards_address, WalletConfig};

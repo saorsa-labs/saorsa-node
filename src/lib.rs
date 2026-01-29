@@ -48,11 +48,18 @@ pub mod node;
 pub mod payment;
 #[cfg(test)]
 mod probe;
+pub mod ant_protocol;
+pub mod storage;
 pub mod upgrade;
 
 pub use client::{DataChunk, QuantumClient, QuantumConfig, XorName};
-pub use config::{BootstrapCacheConfig, NodeConfig};
+pub use config::{BootstrapCacheConfig, NodeConfig, StorageConfig};
 pub use error::{Error, Result};
 pub use event::{NodeEvent, NodeEventsChannel};
 pub use node::{NodeBuilder, RunningNode};
 pub use payment::{PaymentStatus, PaymentVerifier, PaymentVerifierConfig};
+pub use ant_protocol::{
+    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkPutRequest, ChunkPutResponse,
+    ChunkQuoteRequest, ChunkQuoteResponse, CHUNK_PROTOCOL_ID, MAX_CHUNK_SIZE,
+};
+pub use storage::{AntProtocol, DiskStorage, DiskStorageConfig};

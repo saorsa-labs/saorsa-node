@@ -213,10 +213,70 @@ mod tests {
     }
 
     // =========================================================================
+    // Cross-Node Tests (require P2P network)
+    // =========================================================================
+
+    /// Test 8: One node asks another to store a chunk via P2P.
+    ///
+    /// This test validates the full cross-node protocol flow:
+    /// 1. Spins up a minimal 5-node local testnet
+    /// 2. A regular node (node 3) sends a `ChunkPutRequest` to a bootstrap node (node 0)
+    /// 3. The bootstrap node stores the chunk and responds with success
+    /// 4. The regular node then sends a `ChunkGetRequest` to retrieve it
+    /// 5. Verifies the data round-trips correctly
+    #[tokio::test]
+    #[ignore = "Requires real P2P node spawning - run with --ignored"]
+    async fn test_chunk_store_on_remote_node() {
+        let harness = TestHarness::setup_minimal()
+            .await
+            .expect("Failed to setup test harness");
+
+        let fixture = ChunkTestFixture::new();
+
+        // Node 3 (regular) asks Node 0 (bootstrap) to store a chunk
+        let requester = harness.test_node(3).expect("Node 3 should exist");
+        let storage_node = harness.test_node(0).expect("Node 0 should exist");
+
+        let address = requester
+            .store_chunk_on(storage_node, &fixture.small)
+            .await
+            .expect("Failed to store chunk on remote node");
+
+        // Verify the returned address matches the expected content hash
+        let expected_address = ChunkTestFixture::compute_address(&fixture.small);
+        assert_eq!(
+            address, expected_address,
+            "Returned address should match computed content address"
+        );
+
+        // Retrieve the chunk back from the remote node via P2P
+        let retrieved = requester
+            .get_chunk_from(storage_node, &address)
+            .await
+            .expect("Failed to retrieve chunk from remote node");
+
+        let chunk = retrieved.expect("Chunk should exist on remote storage node");
+        assert_eq!(
+            chunk.content.as_ref(),
+            fixture.small.as_slice(),
+            "Retrieved data should match original"
+        );
+        assert_eq!(
+            chunk.address, address,
+            "Chunk address should match the stored address"
+        );
+
+        harness
+            .teardown()
+            .await
+            .expect("Failed to teardown harness");
+    }
+
+    // =========================================================================
     // Tests requiring additional infrastructure (not yet implemented)
     // =========================================================================
 
-    /// Test 8: Chunk replication across nodes.
+    /// Test 9: Chunk replication across nodes.
     ///
     /// Store on one node, retrieve from a different node.
     #[test]

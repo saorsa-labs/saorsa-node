@@ -1,21 +1,34 @@
 //! Node implementation - thin wrapper around saorsa-core's `P2PNode`.
 
+use crate::ant_protocol::CHUNK_PROTOCOL_ID;
 use crate::attestation::VerificationLevel;
 use crate::config::{AttestationMode, AttestationNodeConfig, IpVersion, NetworkMode, NodeConfig};
 use crate::error::{Error, Result};
 use crate::event::{create_event_channel, NodeEvent, NodeEventsChannel, NodeEventsSender};
+use crate::payment::{PaymentVerifier, PaymentVerifierConfig, QuoteGenerator};
+use crate::payment::metrics::QuotingMetricsTracker;
+use crate::payment::wallet::parse_rewards_address;
+use crate::storage::{AntProtocol, DiskStorage, DiskStorageConfig};
 use crate::upgrade::{AutoApplyUpgrader, UpgradeMonitor, UpgradeResult};
+use ant_evm::RewardsAddress;
 use saorsa_core::{
     AttestationConfig as CoreAttestationConfig, BootstrapConfig as CoreBootstrapConfig,
     BootstrapManager, EnforcementMode as CoreEnforcementMode,
-    IPDiversityConfig as CoreDiversityConfig, NodeConfig as CoreNodeConfig, P2PNode,
+    IPDiversityConfig as CoreDiversityConfig, NodeConfig as CoreNodeConfig, P2PEvent, P2PNode,
     ProductionConfig as CoreProductionConfig,
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
+
+/// Maximum number of records for quoting metrics.
+const DEFAULT_MAX_QUOTING_RECORDS: usize = 100_000;
+
+/// Default rewards address when none is configured (20-byte zero address).
+const DEFAULT_REWARDS_ADDRESS: [u8; 20] = [0u8; 20];
 
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
@@ -78,6 +91,14 @@ impl NodeBuilder {
             None
         };
 
+        // Initialize ANT protocol handler for chunk storage
+        let ant_protocol = if self.config.storage.enabled {
+            Some(Arc::new(Self::build_ant_protocol(&self.config).await?))
+        } else {
+            info!("Chunk storage disabled");
+            None
+        };
+
         let node = RunningNode {
             config: self.config,
             p2p_node: Arc::new(p2p_node),
@@ -87,6 +108,8 @@ impl NodeBuilder {
             events_rx: Some(events_rx),
             upgrade_monitor,
             bootstrap_manager,
+            ant_protocol,
+            protocol_task: None,
         };
 
         Ok(node)
@@ -272,6 +295,50 @@ impl NodeBuilder {
         }
     }
 
+    /// Build the ANT protocol handler from config.
+    ///
+    /// Initializes disk storage, payment verifier, and quote generator.
+    async fn build_ant_protocol(config: &NodeConfig) -> Result<AntProtocol> {
+        // Create disk storage
+        let storage_config = DiskStorageConfig {
+            root_dir: config.root_dir.clone(),
+            verify_on_read: config.storage.verify_on_read,
+            max_chunks: config.storage.max_chunks,
+        };
+        let storage = DiskStorage::new(storage_config)
+            .await
+            .map_err(|e| Error::Startup(format!("Failed to create disk storage: {e}")))?;
+
+        // Create payment verifier
+        let payment_config = PaymentVerifierConfig {
+            evm: crate::payment::EvmVerifierConfig {
+                enabled: config.payment.enabled,
+                ..Default::default()
+            },
+            cache_capacity: config.payment.cache_capacity,
+        };
+        let payment_verifier = PaymentVerifier::new(payment_config);
+
+        // Create quote generator
+        let rewards_address = match config.payment.rewards_address {
+            Some(ref addr) => parse_rewards_address(addr)?,
+            None => RewardsAddress::new(DEFAULT_REWARDS_ADDRESS),
+        };
+        let metrics_tracker = QuotingMetricsTracker::new(DEFAULT_MAX_QUOTING_RECORDS, 0);
+        let quote_generator = QuoteGenerator::new(rewards_address, metrics_tracker);
+
+        info!(
+            "ANT protocol handler initialized (protocol={})",
+            CHUNK_PROTOCOL_ID
+        );
+
+        Ok(AntProtocol::new(
+            Arc::new(storage),
+            Arc::new(payment_verifier),
+            Arc::new(quote_generator),
+        ))
+    }
+
     /// Build the bootstrap cache manager from config.
     async fn build_bootstrap_manager(config: &NodeConfig) -> Option<BootstrapManager> {
         let cache_dir = config
@@ -319,6 +386,10 @@ pub struct RunningNode {
     upgrade_monitor: Option<Arc<UpgradeMonitor>>,
     /// Bootstrap cache manager for persistent peer storage.
     bootstrap_manager: Option<BootstrapManager>,
+    /// ANT protocol handler for chunk storage.
+    ant_protocol: Option<Arc<AntProtocol>>,
+    /// Protocol message routing background task.
+    protocol_task: Option<JoinHandle<()>>,
 }
 
 impl RunningNode {
@@ -364,6 +435,9 @@ impl RunningNode {
         if let Err(e) = self.events_tx.send(NodeEvent::Started) {
             warn!("Failed to send Started event: {e}");
         }
+
+        // Start protocol message routing (P2P → AntProtocol → P2P response)
+        self.start_protocol_routing();
 
         // Start upgrade monitor if enabled
         if let Some(ref monitor) = self.upgrade_monitor {
@@ -442,6 +516,11 @@ impl RunningNode {
             }
         }
 
+        // Stop protocol routing task
+        if let Some(handle) = self.protocol_task.take() {
+            handle.abort();
+        }
+
         // Shutdown P2P node
         info!("Shutting down P2P node...");
         if let Err(e) = self.p2p_node.shutdown().await {
@@ -507,6 +586,60 @@ impl RunningNode {
             }
         }
         Ok(())
+    }
+
+    /// Start the protocol message routing background task.
+    ///
+    /// Subscribes to P2P events and routes incoming chunk protocol messages
+    /// to the `AntProtocol` handler, sending responses back to the sender.
+    fn start_protocol_routing(&mut self) {
+        let protocol = match self.ant_protocol {
+            Some(ref p) => Arc::clone(p),
+            None => return,
+        };
+
+        let mut events = self.p2p_node.subscribe_events();
+        let p2p = Arc::clone(&self.p2p_node);
+
+        self.protocol_task = Some(tokio::spawn(async move {
+            while let Ok(event) = events.recv().await {
+                if let P2PEvent::Message {
+                    topic,
+                    source,
+                    data,
+                } = event
+                {
+                    if topic == CHUNK_PROTOCOL_ID {
+                        debug!("Received chunk protocol message from {}", source);
+                        let protocol = Arc::clone(&protocol);
+                        let p2p = Arc::clone(&p2p);
+                        tokio::spawn(async move {
+                            match protocol.handle_message(&data).await {
+                                Ok(response) => {
+                                    if let Err(e) = p2p
+                                        .send_message(
+                                            &source,
+                                            CHUNK_PROTOCOL_ID,
+                                            response.to_vec(),
+                                        )
+                                        .await
+                                    {
+                                        warn!(
+                                            "Failed to send protocol response to {}: {}",
+                                            source, e
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Protocol handler error: {}", e);
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        }));
+        info!("Protocol message routing started");
     }
 
     /// Request the node to shut down.
