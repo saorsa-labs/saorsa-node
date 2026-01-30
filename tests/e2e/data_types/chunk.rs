@@ -220,25 +220,34 @@ mod tests {
     ///
     /// This test validates the full cross-node protocol flow:
     /// 1. Spins up a minimal 5-node local testnet
-    /// 2. A regular node (node 3) sends a `ChunkPutRequest` to a bootstrap node (node 0)
-    /// 3. The bootstrap node stores the chunk and responds with success
-    /// 4. The regular node then sends a `ChunkGetRequest` to retrieve it
-    /// 5. Verifies the data round-trips correctly
+    /// 2. A regular node (node 3) discovers connected peers
+    /// 3. Picks a random peer and sends a `ChunkPutRequest` to it
+    /// 4. The target node stores the chunk and responds with success
+    /// 5. The regular node then sends a `ChunkGetRequest` to retrieve it
+    /// 6. Verifies the data round-trips correctly
     #[tokio::test]
-    #[ignore = "Requires real P2P node spawning - run with --ignored"]
     async fn test_chunk_store_on_remote_node() {
+        use rand::seq::SliceRandom;
+
         let harness = TestHarness::setup_minimal()
             .await
             .expect("Failed to setup test harness");
 
         let fixture = ChunkTestFixture::new();
 
-        // Node 3 (regular) asks Node 0 (bootstrap) to store a chunk
+        // Node 3 (regular) discovers its connected peers and picks a random one
         let requester = harness.test_node(3).expect("Node 3 should exist");
-        let storage_node = harness.test_node(0).expect("Node 0 should exist");
+        let peers = requester.connected_peers().await;
+        assert!(
+            !peers.is_empty(),
+            "Node 3 should have at least one connected peer"
+        );
+
+        let mut rng = rand::thread_rng();
+        let target_peer_id = peers.choose(&mut rng).expect("peers is non-empty");
 
         let address = requester
-            .store_chunk_on(storage_node, &fixture.small)
+            .store_chunk_on_peer(target_peer_id, &fixture.small)
             .await
             .expect("Failed to store chunk on remote node");
 
@@ -249,9 +258,9 @@ mod tests {
             "Returned address should match computed content address"
         );
 
-        // Retrieve the chunk back from the remote node via P2P
+        // Retrieve the chunk back from the same remote peer via P2P
         let retrieved = requester
-            .get_chunk_from(storage_node, &address)
+            .get_chunk_from_peer(target_peer_id, &address)
             .await
             .expect("Failed to retrieve chunk from remote node");
 

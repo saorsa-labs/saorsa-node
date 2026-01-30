@@ -348,6 +348,15 @@ impl TestNode {
         }
     }
 
+    /// Get the list of connected peer IDs.
+    pub async fn connected_peers(&self) -> Vec<String> {
+        if let Some(ref node) = self.p2p_node {
+            node.connected_peers().await
+        } else {
+            vec![]
+        }
+    }
+
     // =========================================================================
     // Chunk Operations (via autonomi protocol messages)
     // =========================================================================
@@ -508,15 +517,30 @@ impl TestNode {
     /// Returns an error if either node is not running, the message cannot be
     /// sent, the response times out, or the remote node reports an error.
     pub async fn store_chunk_on(&self, target: &Self, data: &[u8]) -> Result<XorName> {
-        let p2p = self
-            .p2p_node
-            .as_ref()
-            .ok_or(TestnetError::NodeNotRunning)?;
         let target_p2p = target
             .p2p_node
             .as_ref()
             .ok_or(TestnetError::NodeNotRunning)?;
         let target_peer_id = target_p2p.peer_id().clone();
+        self.store_chunk_on_peer(&target_peer_id, data).await
+    }
+
+    /// Store a chunk on a remote peer via P2P using the peer's ID directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this node is not running, the message cannot be
+    /// sent, the response times out, or the remote peer reports an error.
+    pub async fn store_chunk_on_peer(
+        &self,
+        target_peer_id: &str,
+        data: &[u8],
+    ) -> Result<XorName> {
+        let p2p = self
+            .p2p_node
+            .as_ref()
+            .ok_or(TestnetError::NodeNotRunning)?;
+        let target_peer_id = target_peer_id.to_string();
 
         // Subscribe before sending so we don't miss the response
         let mut events = p2p.subscribe_events();
@@ -561,9 +585,9 @@ impl TestNode {
                             address: addr,
                         }) => {
                             debug!(
-                                "Node {} stored chunk on node {}: {}",
+                                "Node {} stored chunk on peer {}: {}",
                                 self.index,
-                                target.index,
+                                target_peer_id,
                                 hex::encode(addr)
                             );
                             return Ok(addr);
@@ -572,9 +596,9 @@ impl TestNode {
                             address: addr,
                         }) => {
                             debug!(
-                                "Node {} chunk already exists on node {}: {}",
+                                "Node {} chunk already exists on peer {}: {}",
                                 self.index,
-                                target.index,
+                                target_peer_id,
                                 hex::encode(addr)
                             );
                             return Ok(addr);
@@ -618,15 +642,30 @@ impl TestNode {
         target: &Self,
         address: &XorName,
     ) -> Result<Option<DataChunk>> {
-        let p2p = self
-            .p2p_node
-            .as_ref()
-            .ok_or(TestnetError::NodeNotRunning)?;
         let target_p2p = target
             .p2p_node
             .as_ref()
             .ok_or(TestnetError::NodeNotRunning)?;
         let target_peer_id = target_p2p.peer_id().clone();
+        self.get_chunk_from_peer(&target_peer_id, address).await
+    }
+
+    /// Retrieve a chunk from a remote peer via P2P using the peer's ID directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this node is not running, the message cannot be
+    /// sent, the response times out, or the remote peer reports an error.
+    pub async fn get_chunk_from_peer(
+        &self,
+        target_peer_id: &str,
+        address: &XorName,
+    ) -> Result<Option<DataChunk>> {
+        let p2p = self
+            .p2p_node
+            .as_ref()
+            .ok_or(TestnetError::NodeNotRunning)?;
+        let target_peer_id = target_peer_id.to_string();
 
         // Subscribe before sending
         let mut events = p2p.subscribe_events();
@@ -666,9 +705,9 @@ impl TestNode {
                             content,
                         }) => {
                             debug!(
-                                "Node {} retrieved chunk from node {}: {} ({} bytes)",
+                                "Node {} retrieved chunk from peer {}: {} ({} bytes)",
                                 self.index,
-                                target.index,
+                                target_peer_id,
                                 hex::encode(addr),
                                 content.len()
                             );
@@ -678,9 +717,9 @@ impl TestNode {
                             address: addr,
                         }) => {
                             debug!(
-                                "Node {} chunk not found on node {}: {}",
+                                "Node {} chunk not found on peer {}: {}",
                                 self.index,
-                                target.index,
+                                target_peer_id,
                                 hex::encode(addr)
                             );
                             return Ok(None);
