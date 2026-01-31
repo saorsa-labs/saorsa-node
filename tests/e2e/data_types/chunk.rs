@@ -14,8 +14,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use sha2::{Digest, Sha256};
-
 use super::{TestData, MAX_CHUNK_SIZE};
 
 /// Size of small test data (1KB).
@@ -55,12 +53,7 @@ impl ChunkTestFixture {
     /// Compute content address for data (SHA256 hash).
     #[must_use]
     pub fn compute_address(data: &[u8]) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        let hash = hasher.finalize();
-        let mut address = [0u8; 32];
-        address.copy_from_slice(&hash);
-        address
+        saorsa_node::compute_address(data)
     }
 }
 
@@ -68,6 +61,7 @@ impl ChunkTestFixture {
 mod tests {
     use super::*;
     use crate::TestHarness;
+    use rand::seq::SliceRandom;
 
     /// Test 1: Content address computation is deterministic
     #[test]
@@ -132,7 +126,7 @@ mod tests {
     /// 4. Verifies data integrity
     ///
     /// Note: Cross-node retrieval is tested separately in `test_chunk_replication`.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_chunk_store_retrieve_small() {
         let harness = TestHarness::setup_minimal()
             .await
@@ -181,7 +175,7 @@ mod tests {
     }
 
     /// Test 7: Store and retrieve large chunk (4MB max).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_chunk_store_retrieve_large() {
         let harness = TestHarness::setup_minimal()
             .await
@@ -225,10 +219,8 @@ mod tests {
     /// 4. The target node stores the chunk and responds with success
     /// 5. The regular node then sends a `ChunkGetRequest` to retrieve it
     /// 6. Verifies the data round-trips correctly
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_chunk_store_on_remote_node() {
-        use rand::seq::SliceRandom;
-
         let harness = TestHarness::setup_minimal()
             .await
             .expect("Failed to setup test harness");
@@ -311,7 +303,7 @@ mod tests {
     ///
     /// Chunks have a maximum size of 4MB. Attempting to store a larger
     /// chunk should fail with an appropriate error.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_chunk_reject_oversized() {
         let harness = TestHarness::setup_minimal()
             .await

@@ -9,15 +9,12 @@
 //!
 //! Where `xx` and `yy` are the first two bytes of the address in hex.
 
+use crate::ant_protocol::XorName;
 use crate::error::{Error, Result};
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, trace, warn};
-
-/// Content address type (32 bytes).
-pub type XorName = [u8; 32];
 
 /// Configuration for disk storage.
 #[derive(Debug, Clone)]
@@ -282,12 +279,7 @@ impl DiskStorage {
     /// Compute content address (SHA256 hash).
     #[must_use]
     pub fn compute_address(content: &[u8]) -> XorName {
-        let mut hasher = Sha256::new();
-        hasher.update(content);
-        let result = hasher.finalize();
-        let mut address = [0u8; 32];
-        address.copy_from_slice(&result);
-        address
+        crate::client::compute_address(content)
     }
 
     /// Get the root directory.

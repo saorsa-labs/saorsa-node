@@ -17,14 +17,14 @@ use ant_evm::RewardsAddress;
 use bytes::Bytes;
 use rand::Rng;
 use saorsa_core::{NodeConfig as CoreNodeConfig, P2PEvent, P2PNode};
+use saorsa_node::ant_protocol::{
+    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkPutRequest, ChunkPutResponse,
+    CHUNK_PROTOCOL_ID,
+};
 use saorsa_node::client::{DataChunk, XorName};
 use saorsa_node::payment::{
     EvmVerifierConfig, PaymentVerifier, PaymentVerifierConfig, QuoteGenerator,
     QuotingMetricsTracker,
-};
-use saorsa_node::ant_protocol::{
-    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkPutRequest, ChunkPutResponse,
-    CHUNK_PROTOCOL_ID,
 };
 use saorsa_node::storage::{AntProtocol, DiskStorage, DiskStorageConfig};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -415,9 +415,7 @@ impl TestNode {
                 debug!("Node {} stored chunk at {}", self.index, hex::encode(addr));
                 Ok(addr)
             }
-            ChunkMessage::PutResponse(ChunkPutResponse::AlreadyExists {
-                address: addr,
-            }) => {
+            ChunkMessage::PutResponse(ChunkPutResponse::AlreadyExists { address: addr }) => {
                 debug!(
                     "Node {} chunk already exists at {}",
                     self.index,
@@ -425,11 +423,9 @@ impl TestNode {
                 );
                 Ok(addr)
             }
-            ChunkMessage::PutResponse(ChunkPutResponse::PaymentRequired { message }) => {
-                Err(TestnetError::Storage(format!(
-                    "Payment required: {message}"
-                )))
-            }
+            ChunkMessage::PutResponse(ChunkPutResponse::PaymentRequired { message }) => Err(
+                TestnetError::Storage(format!("Payment required: {message}")),
+            ),
             ChunkMessage::PutResponse(ChunkPutResponse::Error(e)) => {
                 Err(TestnetError::Storage(format!("Protocol error: {e}")))
             }
@@ -531,15 +527,8 @@ impl TestNode {
     ///
     /// Returns an error if this node is not running, the message cannot be
     /// sent, the response times out, or the remote peer reports an error.
-    pub async fn store_chunk_on_peer(
-        &self,
-        target_peer_id: &str,
-        data: &[u8],
-    ) -> Result<XorName> {
-        let p2p = self
-            .p2p_node
-            .as_ref()
-            .ok_or(TestnetError::NodeNotRunning)?;
+    pub async fn store_chunk_on_peer(&self, target_peer_id: &str, data: &[u8]) -> Result<XorName> {
+        let p2p = self.p2p_node.as_ref().ok_or(TestnetError::NodeNotRunning)?;
         let target_peer_id = target_peer_id.to_string();
 
         // Subscribe before sending so we don't miss the response
@@ -563,7 +552,9 @@ impl TestNode {
         // Send to target node
         p2p.send_message(&target_peer_id, CHUNK_PROTOCOL_ID, message_bytes)
             .await
-            .map_err(|e| TestnetError::Storage(format!("Failed to send PUT to remote node: {e}")))?;
+            .map_err(|e| {
+                TestnetError::Storage(format!("Failed to send PUT to remote node: {e}"))
+            })?;
 
         // Wait for response from the target
         let timeout = Duration::from_secs(DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS);
@@ -581,9 +572,7 @@ impl TestNode {
                         TestnetError::Storage(format!("Failed to decode PUT response: {e}"))
                     })?;
                     match response {
-                        ChunkMessage::PutResponse(ChunkPutResponse::Success {
-                            address: addr,
-                        }) => {
+                        ChunkMessage::PutResponse(ChunkPutResponse::Success { address: addr }) => {
                             debug!(
                                 "Node {} stored chunk on peer {}: {}",
                                 self.index,
@@ -661,10 +650,7 @@ impl TestNode {
         target_peer_id: &str,
         address: &XorName,
     ) -> Result<Option<DataChunk>> {
-        let p2p = self
-            .p2p_node
-            .as_ref()
-            .ok_or(TestnetError::NodeNotRunning)?;
+        let p2p = self.p2p_node.as_ref().ok_or(TestnetError::NodeNotRunning)?;
         let target_peer_id = target_peer_id.to_string();
 
         // Subscribe before sending
@@ -713,9 +699,7 @@ impl TestNode {
                             );
                             return Ok(Some(DataChunk::new(addr, Bytes::from(content))));
                         }
-                        ChunkMessage::GetResponse(ChunkGetResponse::NotFound {
-                            address: addr,
-                        }) => {
+                        ChunkMessage::GetResponse(ChunkGetResponse::NotFound { address: addr }) => {
                             debug!(
                                 "Node {} chunk not found on peer {}: {}",
                                 self.index,
@@ -745,7 +729,7 @@ impl TestNode {
     /// Compute content address for chunk data (SHA256 hash).
     #[must_use]
     pub fn compute_chunk_address(data: &[u8]) -> XorName {
-        DiskStorage::compute_address(data)
+        saorsa_node::compute_address(data)
     }
 }
 
@@ -1075,10 +1059,7 @@ impl TestNetwork {
                                         }
                                     }
                                     Err(e) => {
-                                        warn!(
-                                            "Node {} protocol handler error: {}",
-                                            node_index, e
-                                        );
+                                        warn!("Node {} protocol handler error: {}", node_index, e);
                                     }
                                 }
                             });

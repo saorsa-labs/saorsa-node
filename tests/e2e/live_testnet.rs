@@ -13,7 +13,6 @@
 )]
 
 use saorsa_core::{NodeConfig as CoreNodeConfig, P2PNode};
-use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -67,12 +66,7 @@ async fn create_testnet_client() -> P2PNode {
 
 /// Compute content address (SHA256 hash).
 fn compute_address(data: &[u8]) -> XorName {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let hash = hasher.finalize();
-    let mut address = [0u8; 32];
-    address.copy_from_slice(&hash);
-    address
+    saorsa_node::compute_address(data)
 }
 
 /// Generate random chunk data.

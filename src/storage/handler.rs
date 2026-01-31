@@ -9,7 +9,7 @@
 //! ┌─────────────────────────────────────────────────────────┐
 //! │                    AntProtocol                        │
 //! ├─────────────────────────────────────────────────────────┤
-//! │  protocol_id() = "saorsa/autonomi/chunk/v1"            │
+//! │  protocol_id() = "saorsa/ant/chunk/v1"                  │
 //! │                                                         │
 //! │  handle_message(data) ──▶ decode ChunkMessage  │
 //! │                                   │                     │
@@ -101,12 +101,8 @@ impl AntProtocol {
             .map_err(|e| crate::error::Error::Protocol(format!("Failed to decode message: {e}")))?;
 
         let response = match message {
-            ChunkMessage::PutRequest(req) => {
-                ChunkMessage::PutResponse(self.handle_put(req).await)
-            }
-            ChunkMessage::GetRequest(req) => {
-                ChunkMessage::GetResponse(self.handle_get(req).await)
-            }
+            ChunkMessage::PutRequest(req) => ChunkMessage::PutResponse(self.handle_put(req).await),
+            ChunkMessage::GetRequest(req) => ChunkMessage::GetResponse(self.handle_get(req).await),
             ChunkMessage::QuoteRequest(ref req) => {
                 ChunkMessage::QuoteResponse(self.handle_quote(req))
             }
@@ -139,7 +135,7 @@ impl AntProtocol {
         }
 
         // 2. Verify content address matches SHA256(content)
-        let computed = DiskStorage::compute_address(&request.content);
+        let computed = crate::client::compute_address(&request.content);
         if computed != address {
             return ChunkPutResponse::Error(ProtocolError::AddressMismatch {
                 expected: address,
@@ -291,7 +287,7 @@ impl AntProtocol {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::payment::metrics::QuotingMetricsTracker;
@@ -357,9 +353,7 @@ mod tests {
             .expect("handle put");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::PutResponse(ChunkPutResponse::Success { address: addr }) =
-            response
-        {
+        if let ChunkMessage::PutResponse(ChunkPutResponse::Success { address: addr }) = response {
             assert_eq!(addr, address);
         } else {
             panic!("expected PutResponse::Success, got: {response:?}");
@@ -404,9 +398,7 @@ mod tests {
             .expect("handle get");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::GetResponse(ChunkGetResponse::NotFound { address: addr }) =
-            response
-        {
+        if let ChunkMessage::GetResponse(ChunkGetResponse::NotFound { address: addr }) = response {
             assert_eq!(addr, address);
         } else {
             panic!("expected GetResponse::NotFound");
@@ -465,9 +457,9 @@ mod tests {
             .expect("handle put");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::PutResponse(ChunkPutResponse::Error(
-            ProtocolError::ChunkTooLarge { .. },
-        )) = response
+        if let ChunkMessage::PutResponse(ChunkPutResponse::Error(ProtocolError::ChunkTooLarge {
+            ..
+        })) = response
         {
             // Expected
         } else {
@@ -506,9 +498,8 @@ mod tests {
             .expect("handle put 2");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::PutResponse(ChunkPutResponse::AlreadyExists {
-            address: addr,
-        }) = response
+        if let ChunkMessage::PutResponse(ChunkPutResponse::AlreadyExists { address: addr }) =
+            response
         {
             assert_eq!(addr, address);
         } else {
