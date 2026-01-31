@@ -1,7 +1,7 @@
 //! Configuration for saorsa-node.
 
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 
 /// IP version configuration.
@@ -129,6 +129,10 @@ pub struct NodeConfig {
     /// Bootstrap cache configuration for persistent peer storage.
     #[serde(default)]
     pub bootstrap_cache: BootstrapCacheConfig,
+
+    /// Storage configuration for chunk persistence.
+    #[serde(default)]
+    pub storage: StorageConfig,
 
     /// Log level.
     #[serde(default = "default_log_level")]
@@ -364,6 +368,7 @@ impl Default for NodeConfig {
             payment: PaymentConfig::default(),
             attestation: AttestationNodeConfig::default(),
             bootstrap_cache: BootstrapCacheConfig::default(),
+            storage: StorageConfig::default(),
             log_level: default_log_level(),
         }
     }
@@ -523,14 +528,58 @@ const fn default_bootstrap_stale_days() -> u64 {
     7
 }
 
+// ============================================================================
+// Storage Configuration
+// ============================================================================
+
+/// Storage configuration for chunk persistence.
+///
+/// Controls how chunks are stored on disk, including:
+/// - Whether storage is enabled
+/// - Maximum chunks to store (for capacity management)
+/// - Content verification on read
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfig {
+    /// Enable chunk storage.
+    /// Default: true
+    #[serde(default = "default_storage_enabled")]
+    pub enabled: bool,
+
+    /// Maximum number of chunks to store (0 = unlimited).
+    /// Default: 0 (unlimited)
+    #[serde(default)]
+    pub max_chunks: usize,
+
+    /// Verify content hash matches address on read.
+    /// Default: true
+    #[serde(default = "default_storage_verify_on_read")]
+    pub verify_on_read: bool,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_storage_enabled(),
+            max_chunks: 0,
+            verify_on_read: default_storage_verify_on_read(),
+        }
+    }
+}
+
+const fn default_storage_enabled() -> bool {
+    true
+}
+
+const fn default_storage_verify_on_read() -> bool {
+    true
+}
+
 /// Default testnet bootstrap nodes.
 ///
 /// These are well-known bootstrap nodes for the Saorsa testnet.
 /// - saorsa-bootstrap-1 (NYC): 165.22.4.178:12000
 /// - saorsa-bootstrap-2 (SFO): 164.92.111.156:12000
 fn default_testnet_bootstrap() -> Vec<SocketAddr> {
-    use std::net::{Ipv4Addr, SocketAddrV4};
-
     vec![
         // saorsa-bootstrap-1 (Digital Ocean NYC1)
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(165, 22, 4, 178), 12000)),

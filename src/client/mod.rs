@@ -56,5 +56,5 @@
 mod data_types;
 mod quantum;
 
-pub use data_types::{ChunkStats, DataChunk, XorName};
+pub use data_types::{compute_address, ChunkStats, DataChunk, XorName};
 pub use quantum::{QuantumClient, QuantumConfig};
