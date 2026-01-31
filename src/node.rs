@@ -5,9 +5,9 @@ use crate::attestation::VerificationLevel;
 use crate::config::{AttestationMode, AttestationNodeConfig, IpVersion, NetworkMode, NodeConfig};
 use crate::error::{Error, Result};
 use crate::event::{create_event_channel, NodeEvent, NodeEventsChannel, NodeEventsSender};
-use crate::payment::{PaymentVerifier, PaymentVerifierConfig, QuoteGenerator};
 use crate::payment::metrics::QuotingMetricsTracker;
 use crate::payment::wallet::parse_rewards_address;
+use crate::payment::{PaymentVerifier, PaymentVerifierConfig, QuoteGenerator};
 use crate::storage::{AntProtocol, DiskStorage, DiskStorageConfig};
 use crate::upgrade::{AutoApplyUpgrader, UpgradeMonitor, UpgradeResult};
 use ant_evm::RewardsAddress;
@@ -617,11 +617,7 @@ impl RunningNode {
                             match protocol.handle_message(&data).await {
                                 Ok(response) => {
                                     if let Err(e) = p2p
-                                        .send_message(
-                                            &source,
-                                            CHUNK_PROTOCOL_ID,
-                                            response.to_vec(),
-                                        )
+                                        .send_message(&source, CHUNK_PROTOCOL_ID, response.to_vec())
                                         .await
                                     {
                                         warn!(

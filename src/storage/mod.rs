@@ -10,7 +10,7 @@
 //! ┌─────────────────────────────────────────────────────────┐
 //! │        AntProtocol (implements Protocol trait)        │
 //! ├─────────────────────────────────────────────────────────┤
-//! │  protocol_id() = "saorsa/autonomi/chunk/v1"            │
+//! │  protocol_id() = "saorsa/ant/chunk/v1"                  │
 //! │                                                         │
 //! │  handle(peer_id, data) ──▶ decode AntProtocolMessage │
 //! │                                   │                     │
@@ -46,5 +46,6 @@
 mod disk;
 mod handler;
 
-pub use disk::{DiskStorage, DiskStorageConfig, StorageStats, XorName};
+pub use crate::ant_protocol::XorName;
+pub use disk::{DiskStorage, DiskStorageConfig, StorageStats};
 pub use handler::AntProtocol;

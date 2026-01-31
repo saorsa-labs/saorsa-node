@@ -1,7 +1,7 @@
 //! Configuration for saorsa-node.
 
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 
 /// IP version configuration.
@@ -580,8 +580,6 @@ const fn default_storage_verify_on_read() -> bool {
 /// - saorsa-bootstrap-1 (NYC): 165.22.4.178:12000
 /// - saorsa-bootstrap-2 (SFO): 164.92.111.156:12000
 fn default_testnet_bootstrap() -> Vec<SocketAddr> {
-    use std::net::{Ipv4Addr, SocketAddrV4};
-
     vec![
         // saorsa-bootstrap-1 (Digital Ocean NYC1)
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(165, 22, 4, 178), 12000)),

@@ -191,8 +191,7 @@ fn test_config_presets() {
 ///
 /// This validates the fundamental `send_message` / `subscribe_events` layer
 /// that all higher-level protocols (chunk, etc.) are built on.
-#[tokio::test]
-#[ignore = "Requires real P2P node spawning - run with --ignored"]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_node_to_node_messaging() {
     const TEST_TOPIC: &str = "test/ping/v1";
     const PAYLOAD: &[u8] = b"hello from node 3";
@@ -207,10 +206,7 @@ async fn test_node_to_node_messaging() {
     // Subscribe on every node's event stream *before* sending, so we can
     // confirm exactly which node receives the message.
     let all_nodes = harness.all_nodes();
-    let mut all_rx: Vec<_> = all_nodes
-        .iter()
-        .map(|n| n.subscribe_events())
-        .collect();
+    let mut all_rx: Vec<_> = all_nodes.iter().map(|n| n.subscribe_events()).collect();
 
     // Pick node 3 (regular) and send to one of its connected peers.
     let sender = harness.test_node(3).expect("Node 3 should exist");
@@ -257,13 +253,16 @@ async fn test_node_to_node_messaging() {
                     }
                 }
             }
-            _ = &mut timeout => {
+            () = &mut timeout => {
                 break;
             }
         }
     }
 
-    assert!(received, "No node received the message on topic '{TEST_TOPIC}'");
+    assert!(
+        received,
+        "No node received the message on topic '{TEST_TOPIC}'"
+    );
 
     // Drop event subscribers before teardown — holding broadcast receivers
     // can prevent background tasks from terminating during shutdown.

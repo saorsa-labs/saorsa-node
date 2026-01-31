@@ -261,7 +261,7 @@ impl std::fmt::Display for ProtocolError {
 impl std::error::Error for ProtocolError {}
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
