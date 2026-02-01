@@ -28,7 +28,6 @@ saorsa-core = "0.10.2"
 saorsa-pqc = "0.4.0"
 
 # Payment verification - autonomi network lookup + EVM payment
-autonomi = "0.9"
 ant-evm = "0.1.19"
 evmlib = "0.4.7"
 xor_name = "5"
