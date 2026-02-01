@@ -5,17 +5,13 @@
 //! the address is the SHA256 hash of the content.
 
 use bytes::Bytes;
-use sha2::{Digest, Sha256};
 
 /// Compute the content address (SHA256 hash) for the given data.
+///
+/// Delegates to [`crate::ant_protocol::compute_address`], the canonical definition.
 #[must_use]
 pub fn compute_address(content: &[u8]) -> XorName {
-    let mut hasher = Sha256::new();
-    hasher.update(content);
-    let result = hasher.finalize();
-    let mut address = [0u8; 32];
-    address.copy_from_slice(&result);
-    address
+    crate::ant_protocol::compute_address(content)
 }
 
 /// A content-addressed identifier (32 bytes).

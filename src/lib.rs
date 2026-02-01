@@ -53,10 +53,10 @@ pub mod storage;
 pub mod upgrade;
 
 pub use ant_protocol::{
-    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkPutRequest, ChunkPutResponse,
-    ChunkQuoteRequest, ChunkQuoteResponse, CHUNK_PROTOCOL_ID, MAX_CHUNK_SIZE,
+    compute_address, ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkPutRequest,
+    ChunkPutResponse, ChunkQuoteRequest, ChunkQuoteResponse, CHUNK_PROTOCOL_ID, MAX_CHUNK_SIZE,
 };
-pub use client::{compute_address, DataChunk, QuantumClient, QuantumConfig, XorName};
+pub use client::{DataChunk, QuantumClient, QuantumConfig, XorName};
 pub use config::{BootstrapCacheConfig, NodeConfig, StorageConfig};
 pub use error::{Error, Result};
 pub use event::{NodeEvent, NodeEventsChannel};

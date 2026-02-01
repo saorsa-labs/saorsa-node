@@ -112,7 +112,7 @@ impl DiskStorage {
     /// Returns an error if the write fails or content doesn't match address.
     pub async fn put(&self, address: &XorName, content: &[u8]) -> Result<bool> {
         // Verify content address
-        let computed = Self::compute_address(content);
+        let computed = crate::ant_protocol::compute_address(content);
         if computed != *address {
             return Err(Error::Storage(format!(
                 "Content address mismatch: expected {}, computed {}",
@@ -228,7 +228,7 @@ impl DiskStorage {
 
         // Verify content if configured
         if self.config.verify_on_read {
-            let computed = Self::compute_address(&content);
+            let computed = crate::ant_protocol::compute_address(&content);
             if computed != *address {
                 {
                     let mut stats = self.stats.write();
@@ -318,12 +318,6 @@ impl DiskStorage {
             .join(filename)
     }
 
-    /// Compute content address (SHA256 hash).
-    #[must_use]
-    pub fn compute_address(content: &[u8]) -> XorName {
-        crate::client::compute_address(content)
-    }
-
     /// Get the root directory.
     #[must_use]
     pub fn root_dir(&self) -> &Path {
@@ -335,6 +329,7 @@ impl DiskStorage {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::ant_protocol::compute_address;
     use tempfile::TempDir;
 
     async fn create_test_storage() -> (DiskStorage, TempDir) {
@@ -353,7 +348,7 @@ mod tests {
         let (storage, _temp) = create_test_storage().await;
 
         let content = b"hello world";
-        let address = DiskStorage::compute_address(content);
+        let address = compute_address(content);
 
         // Store chunk
         let is_new = storage.put(&address, content).await.expect("put");
@@ -369,7 +364,7 @@ mod tests {
         let (storage, _temp) = create_test_storage().await;
 
         let content = b"test data";
-        let address = DiskStorage::compute_address(content);
+        let address = compute_address(content);
 
         // First store
         let is_new1 = storage.put(&address, content).await.expect("put 1");
@@ -399,7 +394,7 @@ mod tests {
         let (storage, _temp) = create_test_storage().await;
 
         let content = b"exists test";
-        let address = DiskStorage::compute_address(content);
+        let address = compute_address(content);
 
         assert!(!storage.exists(&address).await.expect("exists"));
 
@@ -413,7 +408,7 @@ mod tests {
         let (storage, _temp) = create_test_storage().await;
 
         let content = b"delete test";
-        let address = DiskStorage::compute_address(content);
+        let address = compute_address(content);
 
         // Store
         storage.put(&address, content).await.expect("put");
@@ -442,9 +437,9 @@ mod tests {
         let content1 = b"chunk one";
         let content2 = b"chunk two";
         let content3 = b"chunk three";
-        let addr1 = DiskStorage::compute_address(content1);
-        let addr2 = DiskStorage::compute_address(content2);
-        let addr3 = DiskStorage::compute_address(content3);
+        let addr1 = compute_address(content1);
+        let addr2 = compute_address(content2);
+        let addr3 = compute_address(content3);
 
         // First two should succeed
         assert!(storage.put(&addr1, content1).await.is_ok());
@@ -490,7 +485,7 @@ mod tests {
     fn test_compute_address() {
         // Known SHA256 hash of "hello world"
         let content = b"hello world";
-        let address = DiskStorage::compute_address(content);
+        let address = compute_address(content);
 
         let expected_hex = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
         assert_eq!(hex::encode(address), expected_hex);
@@ -502,8 +497,8 @@ mod tests {
 
         let content1 = b"content 1";
         let content2 = b"content 2";
-        let address1 = DiskStorage::compute_address(content1);
-        let address2 = DiskStorage::compute_address(content2);
+        let address1 = compute_address(content1);
+        let address2 = compute_address(content2);
 
         // Store two chunks
         storage.put(&address1, content1).await.expect("put 1");

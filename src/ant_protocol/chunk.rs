@@ -7,6 +7,7 @@
 //! using bincode serialization for compact, fast encoding.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Protocol identifier for chunk operations.
 pub const CHUNK_PROTOCOL_ID: &str = "saorsa/ant/chunk/v1";
@@ -22,6 +23,20 @@ pub const DATA_TYPE_CHUNK: u32 = 0;
 
 /// Content-addressed identifier (32 bytes).
 pub type XorName = [u8; 32];
+
+/// Compute the content address (SHA256 hash) for the given data.
+///
+/// This is the canonical address computation used throughout the protocol.
+/// A chunk's address is always `SHA256(content)`.
+#[must_use]
+pub fn compute_address(content: &[u8]) -> XorName {
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    let result = hasher.finalize();
+    let mut address = [0u8; 32];
+    address.copy_from_slice(&result);
+    address
+}
 
 /// Wrapper enum for all chunk protocol messages.
 ///

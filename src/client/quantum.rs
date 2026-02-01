@@ -224,7 +224,7 @@ impl QuantumClient {
         let mut events = node.subscribe_events();
 
         // Compute content address using SHA-256
-        let address = crate::client::compute_address(&content);
+        let address = crate::ant_protocol::compute_address(&content);
 
         // Create PUT request with empty payment proof
         let empty_payment = rmp_serde::to_vec(&ant_evm::ProofOfPayment {

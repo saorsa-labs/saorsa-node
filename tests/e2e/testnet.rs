@@ -1026,51 +1026,10 @@ impl TestNetwork {
 
         // Start protocol handler that routes incoming P2P messages to AntProtocol
         if let (Some(ref p2p), Some(ref protocol)) = (&node.p2p_node, &node.ant_protocol) {
-            let mut events = p2p.subscribe_events();
-            let p2p_clone = Arc::clone(p2p);
-            let protocol_clone = Arc::clone(protocol);
-            let node_index = node.index;
-            node.protocol_task = Some(tokio::spawn(async move {
-                while let Ok(event) = events.recv().await {
-                    if let P2PEvent::Message {
-                        topic,
-                        source,
-                        data,
-                    } = event
-                    {
-                        if topic == CHUNK_PROTOCOL_ID {
-                            debug!(
-                                "Node {} received chunk protocol message from {}",
-                                node_index, source
-                            );
-                            let protocol = Arc::clone(&protocol_clone);
-                            let p2p = Arc::clone(&p2p_clone);
-                            tokio::spawn(async move {
-                                match protocol.handle_message(&data).await {
-                                    Ok(response) => {
-                                        if let Err(e) = p2p
-                                            .send_message(
-                                                &source,
-                                                CHUNK_PROTOCOL_ID,
-                                                response.to_vec(),
-                                            )
-                                            .await
-                                        {
-                                            warn!(
-                                                "Node {} failed to send response to {}: {}",
-                                                node_index, source, e
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!("Node {} protocol handler error: {}", node_index, e);
-                                    }
-                                }
-                            });
-                        }
-                    }
-                }
-            }));
+            node.protocol_task = Some(AntProtocol::spawn_routing_task(
+                Arc::clone(protocol),
+                Arc::clone(p2p),
+            ));
         }
 
         debug!("Node {} started successfully", node.index);

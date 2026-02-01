@@ -35,7 +35,9 @@ use crate::error::Result;
 use crate::payment::{PaymentVerifier, QuoteGenerator};
 use crate::storage::disk::DiskStorage;
 use bytes::Bytes;
+use saorsa_core::{P2PEvent, P2PNode};
 use std::sync::Arc;
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 /// ANT protocol handler.
@@ -134,16 +136,9 @@ impl AntProtocol {
             });
         }
 
-        // 2. Verify content address matches SHA256(content)
-        let computed = crate::client::compute_address(&request.content);
-        if computed != address {
-            return ChunkPutResponse::Error(ProtocolError::AddressMismatch {
-                expected: address,
-                actual: computed,
-            });
-        }
-
-        // 3. Check if already exists (idempotent success)
+        // 2. Check if already exists (idempotent success)
+        // Note: content-address verification (SHA256(content) == address) is handled
+        // by DiskStorage::put() which is the authoritative check.
         match self.storage.exists(&address).await {
             Ok(true) => {
                 debug!("Chunk {} already exists", hex::encode(address));
@@ -293,12 +288,59 @@ impl AntProtocol {
     pub async fn put_local(&self, address: &[u8; 32], content: &[u8]) -> Result<bool> {
         self.storage.put(address, content).await
     }
+
+    /// Spawn a background task that routes incoming P2P chunk messages to this
+    /// handler and sends responses back to the originating peer.
+    ///
+    /// This is the shared routing loop used by both the production node and the
+    /// E2E test infrastructure.
+    ///
+    /// Returns a [`JoinHandle`] that should be aborted on shutdown.
+    pub fn spawn_routing_task(protocol: Arc<Self>, p2p: Arc<P2PNode>) -> JoinHandle<()> {
+        let mut events = p2p.subscribe_events();
+
+        tokio::spawn(async move {
+            while let Ok(event) = events.recv().await {
+                if let P2PEvent::Message {
+                    topic,
+                    source,
+                    data,
+                } = event
+                {
+                    if topic == CHUNK_PROTOCOL_ID {
+                        debug!("Received chunk protocol message from {}", source);
+                        let protocol = Arc::clone(&protocol);
+                        let p2p = Arc::clone(&p2p);
+                        tokio::spawn(async move {
+                            match protocol.handle_message(&data).await {
+                                Ok(response) => {
+                                    if let Err(e) = p2p
+                                        .send_message(&source, CHUNK_PROTOCOL_ID, response.to_vec())
+                                        .await
+                                    {
+                                        warn!(
+                                            "Failed to send protocol response to {}: {}",
+                                            source, e
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Protocol handler error: {}", e);
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        })
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::ant_protocol::compute_address;
     use crate::payment::metrics::QuotingMetricsTracker;
     use crate::payment::{EvmVerifierConfig, PaymentVerifierConfig};
     use crate::storage::DiskStorageConfig;
@@ -341,7 +383,7 @@ mod tests {
         let (protocol, _temp) = create_test_protocol().await;
 
         let content = b"hello world";
-        let address = DiskStorage::compute_address(content);
+        let address = compute_address(content);
 
         // Create PUT request - with empty payment proof (EVM disabled)
         let put_request = ChunkPutRequest::with_payment(
@@ -438,13 +480,18 @@ mod tests {
             .expect("handle put");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::PutResponse(ChunkPutResponse::Error(
-            ProtocolError::AddressMismatch { .. },
-        )) = response
+        // Address verification is done by DiskStorage::put(), which returns a
+        // StorageFailed error containing "Content address mismatch".
+        if let ChunkMessage::PutResponse(ChunkPutResponse::Error(ProtocolError::StorageFailed(
+            msg,
+        ))) = response
         {
-            // Expected
+            assert!(
+                msg.contains("address mismatch"),
+                "expected mismatch error, got: {msg}"
+            );
         } else {
-            panic!("expected AddressMismatch error, got: {response:?}");
+            panic!("expected StorageFailed error with address mismatch, got: {response:?}");
         }
     }
 
@@ -454,7 +501,7 @@ mod tests {
 
         // Create oversized content
         let content = vec![0u8; MAX_CHUNK_SIZE + 1];
-        let address = DiskStorage::compute_address(&content);
+        let address = compute_address(&content);
 
         let put_request = ChunkPutRequest::new(address, content);
         let put_msg = ChunkMessage::PutRequest(put_request);
@@ -481,7 +528,7 @@ mod tests {
         let (protocol, _temp) = create_test_protocol().await;
 
         let content = b"duplicate content";
-        let address = DiskStorage::compute_address(content);
+        let address = compute_address(content);
 
         // Store first time
         let put_request = ChunkPutRequest::with_payment(
@@ -527,7 +574,7 @@ mod tests {
         let (protocol, _temp) = create_test_protocol().await;
 
         let content = b"local access test";
-        let address = DiskStorage::compute_address(content);
+        let address = compute_address(content);
 
         assert!(!protocol.exists(&address).await.expect("exists check"));
 

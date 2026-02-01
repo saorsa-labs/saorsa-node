@@ -17,7 +17,7 @@ use evmlib::Network as EvmNetwork;
 use saorsa_core::{
     AttestationConfig as CoreAttestationConfig, BootstrapConfig as CoreBootstrapConfig,
     BootstrapManager, EnforcementMode as CoreEnforcementMode,
-    IPDiversityConfig as CoreDiversityConfig, NodeConfig as CoreNodeConfig, P2PEvent, P2PNode,
+    IPDiversityConfig as CoreDiversityConfig, NodeConfig as CoreNodeConfig, P2PNode,
     ProductionConfig as CoreProductionConfig,
 };
 use std::net::SocketAddr;
@@ -605,43 +605,8 @@ impl RunningNode {
             None => return,
         };
 
-        let mut events = self.p2p_node.subscribe_events();
         let p2p = Arc::clone(&self.p2p_node);
-
-        self.protocol_task = Some(tokio::spawn(async move {
-            while let Ok(event) = events.recv().await {
-                if let P2PEvent::Message {
-                    topic,
-                    source,
-                    data,
-                } = event
-                {
-                    if topic == CHUNK_PROTOCOL_ID {
-                        debug!("Received chunk protocol message from {}", source);
-                        let protocol = Arc::clone(&protocol);
-                        let p2p = Arc::clone(&p2p);
-                        tokio::spawn(async move {
-                            match protocol.handle_message(&data).await {
-                                Ok(response) => {
-                                    if let Err(e) = p2p
-                                        .send_message(&source, CHUNK_PROTOCOL_ID, response.to_vec())
-                                        .await
-                                    {
-                                        warn!(
-                                            "Failed to send protocol response to {}: {}",
-                                            source, e
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("Protocol handler error: {}", e);
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-        }));
+        self.protocol_task = Some(AntProtocol::spawn_routing_task(protocol, p2p));
         info!("Protocol message routing started");
     }
 
