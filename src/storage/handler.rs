@@ -65,11 +65,6 @@ impl AntProtocol {
         payment_verifier: Arc<PaymentVerifier>,
         quote_generator: Arc<QuoteGenerator>,
     ) -> Self {
-        info!(
-            "ANT protocol handler initialized (protocol={})",
-            CHUNK_PROTOCOL_ID
-        );
-
         Self {
             storage,
             payment_verifier,
