@@ -11,7 +11,8 @@
 
 use crate::ant_protocol::XorName;
 use crate::error::{Error, Result};
-use std::collections::HashMap;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
@@ -59,6 +60,17 @@ pub struct StorageStats {
     pub verification_failures: u64,
 }
 
+/// Maximum number of per-address locks to keep in the LRU cache.
+///
+/// This bounds memory usage for the lock map. If a lock is evicted while a
+/// `put()` is still in flight, the in-flight operation continues safely
+/// because it holds its own `Arc<Mutex<()>>`. A subsequent put for the same
+/// address simply creates a fresh lock. The only consequence of eviction is
+/// that two puts for the same address could briefly run without mutual
+/// exclusion — but since puts are idempotent (content-addressed, atomic
+/// rename), this is harmless.
+const ADDRESS_LOCK_CACHE_CAPACITY: usize = 16_384;
+
 /// Content-addressed disk storage.
 ///
 /// Uses a sharded directory structure for efficient storage:
@@ -71,7 +83,9 @@ pub struct DiskStorage {
     /// Operation statistics.
     stats: parking_lot::RwLock<StorageStats>,
     /// Per-address locks to prevent TOCTOU races on concurrent puts.
-    address_locks: Mutex<HashMap<XorName, Arc<Mutex<()>>>>,
+    /// Bounded LRU cache to prevent unbounded memory growth on nodes with
+    /// unlimited `max_chunks`. Eviction is safe — see [`ADDRESS_LOCK_CACHE_CAPACITY`].
+    address_locks: Mutex<LruCache<XorName, Arc<Mutex<()>>>>,
 }
 
 impl DiskStorage {
@@ -89,10 +103,14 @@ impl DiskStorage {
 
         debug!("Initialized disk storage at {:?}", config.root_dir);
 
+        // SAFETY: ADDRESS_LOCK_CACHE_CAPACITY is a non-zero constant.
+        let lock_capacity = NonZeroUsize::new(ADDRESS_LOCK_CACHE_CAPACITY)
+            .unwrap_or(NonZeroUsize::MIN);
+
         Ok(Self {
             config,
             stats: parking_lot::RwLock::new(StorageStats::default()),
-            address_locks: Mutex::new(HashMap::new()),
+            address_locks: Mutex::new(LruCache::new(lock_capacity)),
         })
     }
 
@@ -128,9 +146,7 @@ impl DiskStorage {
         let lock = {
             let mut locks = self.address_locks.lock().await;
             Arc::clone(
-                locks
-                    .entry(*address)
-                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+                locks.get_or_insert(*address, || Arc::new(Mutex::new(()))),
             )
         };
         let guard = lock.lock().await;
@@ -194,12 +210,9 @@ impl DiskStorage {
             stats.bytes_stored += content.len() as u64;
         }
 
-        // Release the per-address lock. We intentionally keep the entry in
-        // `address_locks` — it is a cheap empty Mutex<()> and will be reused on
-        // subsequent puts to the same address. Attempting to evict based on
-        // `Arc::strong_count` is racy and documented as unreliable for
-        // synchronization. The map is bounded by the number of unique addresses
-        // stored, which is already bounded by `max_chunks`.
+        // Release the per-address lock. The LRU cache may eventually evict
+        // this entry, which is safe: any concurrent put still holds its own
+        // Arc and will complete normally.
         drop(guard);
 
         debug!(

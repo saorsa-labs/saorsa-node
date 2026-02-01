@@ -147,6 +147,23 @@ saorsa-node/
 │   ├── config.rs                 # Configuration (wraps saorsa-core configs)
 │   ├── event.rs                  # NodeEvent system
 │   │
+│   ├── ant_protocol/             # ANT wire protocol (chunk messages)
+│   │   ├── mod.rs
+│   │   └── chunk.rs              # Bincode-serialized PUT/GET/Quote messages
+│   │
+│   ├── storage/                  # Content-addressed chunk persistence
+│   │   ├── mod.rs
+│   │   ├── disk.rs               # Sharded directory storage with atomic writes
+│   │   └── handler.rs            # AntProtocol handler (routes messages to storage)
+│   │
+│   ├── client/                   # Quantum-resistant client operations
+│   │   ├── mod.rs
+│   │   ├── quantum.rs            # QuantumClient (chunk PUT/GET over P2P)
+│   │   └── data_types.rs         # DataChunk, XorName
+│   │
+│   ├── payment/                  # EVM payment verification and quoting
+│   │   └── ...
+│   │
 │   ├── migration/                # ant-node data migration (NEW CODE)
 │   │   ├── mod.rs
 │   │   ├── scanner.rs            # Find ant-node data directories
@@ -160,23 +177,27 @@ saorsa-node/
 │       └── executor.rs           # Process replacement + rollback
 │
 ├── tests/                        # Integration tests
-│   ├── node_lifecycle.rs
-│   ├── multi_node.rs
-│   ├── migration.rs
-│   └── upgrade.rs
+│   ├── e2e/
+│   │   ├── testnet.rs            # 25-node local testnet infrastructure
+│   │   ├── integration_tests.rs  # Network formation and messaging tests
+│   │   └── data_types/chunk.rs   # Chunk store/retrieve E2E tests
+│   └── ...
 │
 └── README.md
 ```
 
-**REMOVED** (provided by saorsa-core):
-- `network/` - Use NetworkCoordinator + DualStackNetworkNode
+**Delegated to saorsa-core:**
+- `network/` - Use P2PNode + DualStackNetworkNode
 - `trust/` - Use EigenTrustEngine
-- `storage/` - Use ContentStore
-- `replication/` - Use ReplicationManager
+
+**Implemented in saorsa-node** (not provided by saorsa-core):
+- `storage/` - Content-addressed chunk persistence with sharded directories, atomic writes, and TOCTOU-safe concurrency. saorsa-core's `ContentStore` operates at the DHT level; saorsa-node needs its own disk storage layer for the ANT chunk protocol.
+- `ant_protocol/` - Bincode-serialized wire protocol for chunk PUT/GET/Quote operations. This is the autonomi-compatible protocol layer that sits between P2P transport and disk storage.
+- Replication is not yet implemented. saorsa-core provides DHT-level replication via `ReplicationManager`, but chunk-level replication across storage nodes is a future milestone.
 
 ### Core Components
 
-**KEY INSIGHT: saorsa-core already provides ALL security, networking, and DHT features. saorsa-node is a thin wrapper!**
+**KEY INSIGHT: saorsa-core provides security, networking, and DHT features. saorsa-node adds the application-level chunk storage protocol, disk persistence, and payment integration on top.**
 
 #### 1. SaorsaNode (Thin Wrapper Around saorsa-core)
 
@@ -346,11 +367,26 @@ pub struct NetworkCoordinator {
 }
 ```
 
-#### 8. What saorsa-node ACTUALLY Needs to Build
+#### 8. What saorsa-node Builds
 
-**Only these components are truly new:**
+**Components implemented in saorsa-node:**
 
 ```rust
+/// ANT chunk protocol - wire protocol for chunk operations (not in saorsa-core)
+pub struct AntProtocol {
+    storage: Arc<DiskStorage>,                // Content-addressed disk persistence
+    payment_verifier: Arc<PaymentVerifier>,   // EVM payment verification
+    quote_generator: Arc<QuoteGenerator>,     // Storage quote generation
+}
+
+/// Content-addressed disk storage (not in saorsa-core)
+/// saorsa-core's ContentStore is DHT-level; this is the local persistence layer
+pub struct DiskStorage {
+    config: DiskStorageConfig,                // Root dir, max_chunks, verify_on_read
+    stats: RwLock<StorageStats>,              // Operation counters
+    address_locks: Mutex<LruCache<...>>,      // Per-address TOCTOU protection
+}
+
 /// Auto-upgrade system (not in saorsa-core)
 pub struct UpgradeMonitor {
     github_repo: String,                      // "dirvine/saorsa-node"
@@ -378,20 +414,24 @@ pub struct NodeLifecycle {
 
 ## Implementation Phases
 
-**KEY INSIGHT**: saorsa-core already provides:
+**saorsa-core provides:**
 - Dual IPv4/IPv6 with DualStackNetworkNode and Happy Eyeballs
 - Sybil Resistance with IPv6NodeID and IPDiversityEnforcer
 - EigenTrust++ with full trust engine
 - Geographic Routing with 7 regions and latency-aware selection
 - Security Manager with rate limiting, blacklist, eclipse detection
-- NetworkCoordinator that integrates everything
-- Storage and replication via ContentStore and ReplicationManager
+- P2P transport and message routing via P2PNode
+- DHT-level storage via ContentStore (not used for chunk persistence)
 
-**saorsa-node only needs to build**:
-1. Auto-upgrade system (Phase 1 Critical)
-2. ant-node data migration
-3. Node lifecycle/CLI wrapper
-4. Configuration/startup glue
+**saorsa-node builds on top:**
+1. ANT chunk protocol (wire format, message routing, handler)
+2. Content-addressed disk storage (sharded directories, atomic writes)
+3. EVM payment verification and quoting
+4. Auto-upgrade system (Phase 1 Critical)
+5. ant-node data migration
+6. Node lifecycle/CLI wrapper
+7. Configuration/startup glue
+8. Chunk replication across storage nodes (future — see below)
 
 ### Phase 1: Repository Setup & Core Structure
 
@@ -497,7 +537,7 @@ pub struct NodeLifecycle {
 
 ```toml
 [dependencies]
-# Core (provides EVERYTHING: networking, DHT, security, trust, storage)
+# Core (provides networking, DHT, security, trust)
 saorsa-core = { path = "../saorsa-core" }
 saorsa-pqc = { path = "../saorsa-pqc" }  # ML-DSA for upgrade signature verification
 
