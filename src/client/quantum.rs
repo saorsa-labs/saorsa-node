@@ -23,12 +23,12 @@ use crate::ant_protocol::{
 };
 use crate::error::{Error, Result};
 use bytes::Bytes;
-use saorsa_core::{P2PEvent, P2PNode};
 use rand::Rng;
+use saorsa_core::{P2PEvent, P2PNode};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Default timeout for network operations in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -154,9 +154,13 @@ impl QuantumClient {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match tokio::time::timeout(remaining, events.recv()).await {
                 Ok(Ok(P2PEvent::Message { topic, data, .. })) if topic == CHUNK_PROTOCOL_ID => {
-                    let response = ChunkMessage::decode(&data).map_err(|e| {
-                        Error::Network(format!("Failed to decode GET response: {e}"))
-                    })?;
+                    let response = match ChunkMessage::decode(&data) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!("Failed to decode chunk message, skipping: {e}");
+                            continue;
+                        }
+                    };
                     if response.request_id != request_id {
                         continue; // Not our response, keep waiting
                     }
@@ -260,9 +264,13 @@ impl QuantumClient {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match tokio::time::timeout(remaining, events.recv()).await {
                 Ok(Ok(P2PEvent::Message { topic, data, .. })) if topic == CHUNK_PROTOCOL_ID => {
-                    let response = ChunkMessage::decode(&data).map_err(|e| {
-                        Error::Network(format!("Failed to decode PUT response: {e}"))
-                    })?;
+                    let response = match ChunkMessage::decode(&data) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!("Failed to decode chunk message, skipping: {e}");
+                            continue;
+                        }
+                    };
                     if response.request_id != request_id {
                         continue; // Not our response, keep waiting
                     }

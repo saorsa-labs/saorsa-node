@@ -582,9 +582,13 @@ impl TestNode {
                     data: resp_data,
                     ..
                 })) if topic == CHUNK_PROTOCOL_ID => {
-                    let response = ChunkMessage::decode(&resp_data).map_err(|e| {
-                        TestnetError::Storage(format!("Failed to decode PUT response: {e}"))
-                    })?;
+                    let response = match ChunkMessage::decode(&resp_data) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!("Failed to decode chunk message, skipping: {e}");
+                            continue;
+                        }
+                    };
                     if response.request_id != request_id {
                         continue; // Not our response, keep waiting
                     }
@@ -707,9 +711,13 @@ impl TestNode {
                     data: resp_data,
                     ..
                 })) if topic == CHUNK_PROTOCOL_ID => {
-                    let response = ChunkMessage::decode(&resp_data).map_err(|e| {
-                        TestnetError::Retrieval(format!("Failed to decode GET response: {e}"))
-                    })?;
+                    let response = match ChunkMessage::decode(&resp_data) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!("Failed to decode chunk message, skipping: {e}");
+                            continue;
+                        }
+                    };
                     if response.request_id != request_id {
                         continue; // Not our response, keep waiting
                     }
