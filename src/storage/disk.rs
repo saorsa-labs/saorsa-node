@@ -11,9 +11,12 @@
 
 use crate::ant_protocol::XorName;
 use crate::error::{Error, Result};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 use tracing::{debug, trace, warn};
 
 /// Configuration for disk storage.
@@ -65,6 +68,8 @@ pub struct DiskStorage {
     config: DiskStorageConfig,
     /// Operation statistics.
     stats: parking_lot::RwLock<StorageStats>,
+    /// Per-address locks to prevent TOCTOU races on concurrent puts.
+    address_locks: Mutex<HashMap<XorName, Arc<Mutex<()>>>>,
 }
 
 impl DiskStorage {
@@ -85,6 +90,7 @@ impl DiskStorage {
         Ok(Self {
             config,
             stats: parking_lot::RwLock::new(StorageStats::default()),
+            address_locks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -115,10 +121,23 @@ impl DiskStorage {
             )));
         }
 
+        // Acquire per-address lock to prevent TOCTOU races between
+        // concurrent puts for the same address.
+        let lock = {
+            let mut locks = self.address_locks.lock().await;
+            Arc::clone(
+                locks
+                    .entry(*address)
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+        let _guard = lock.lock().await;
+
         let chunk_path = self.chunk_path(address);
 
-        // Check if already exists
-        if chunk_path.exists() {
+        // Check if already exists (safe under per-address lock)
+        let file_exists = fs::try_exists(&chunk_path).await.is_ok_and(|v| v);
+        if file_exists {
             trace!("Chunk {} already exists", hex::encode(address));
             {
                 let mut stats = self.stats.write();
@@ -145,7 +164,7 @@ impl DiskStorage {
                 .map_err(|e| Error::Storage(format!("Failed to create shard directory: {e}")))?;
         }
 
-        // Atomic write: temp file + rename
+        // Atomic write: temp file + sync + rename
         let temp_path = chunk_path.with_extension("tmp");
         let mut file = fs::File::create(&temp_path)
             .await
@@ -155,9 +174,9 @@ impl DiskStorage {
             .await
             .map_err(|e| Error::Storage(format!("Failed to write chunk: {e}")))?;
 
-        file.flush()
+        file.sync_data()
             .await
-            .map_err(|e| Error::Storage(format!("Failed to flush chunk: {e}")))?;
+            .map_err(|e| Error::Storage(format!("Failed to sync chunk to disk: {e}")))?;
 
         // Rename for atomic commit
         fs::rename(&temp_path, &chunk_path)
@@ -195,9 +214,12 @@ impl DiskStorage {
     pub async fn get(&self, address: &XorName) -> Result<Option<Vec<u8>>> {
         let chunk_path = self.chunk_path(address);
 
-        if !chunk_path.exists() {
-            trace!("Chunk {} not found", hex::encode(address));
-            return Ok(None);
+        match fs::try_exists(&chunk_path).await {
+            Ok(false) | Err(_) => {
+                trace!("Chunk {} not found", hex::encode(address));
+                return Ok(None);
+            }
+            Ok(true) => {}
         }
 
         let content = fs::read(&chunk_path)
@@ -240,9 +262,15 @@ impl DiskStorage {
     }
 
     /// Check if a chunk exists.
-    #[must_use]
-    pub fn exists(&self, address: &XorName) -> bool {
-        self.chunk_path(address).exists()
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the filesystem check fails.
+    pub async fn exists(&self, address: &XorName) -> Result<bool> {
+        let chunk_path = self.chunk_path(address);
+        fs::try_exists(&chunk_path)
+            .await
+            .map_err(|e| Error::Storage(format!("Failed to check chunk existence: {e}")))
     }
 
     /// Delete a chunk.
@@ -253,7 +281,10 @@ impl DiskStorage {
     pub async fn delete(&self, address: &XorName) -> Result<bool> {
         let chunk_path = self.chunk_path(address);
 
-        if !chunk_path.exists() {
+        let file_exists = fs::try_exists(&chunk_path)
+            .await
+            .map_err(|e| Error::Storage(format!("Failed to check chunk existence: {e}")))?;
+        if !file_exists {
             return Ok(false);
         }
 
@@ -370,11 +401,11 @@ mod tests {
         let content = b"exists test";
         let address = DiskStorage::compute_address(content);
 
-        assert!(!storage.exists(&address));
+        assert!(!storage.exists(&address).await.expect("exists"));
 
         storage.put(&address, content).await.expect("put");
 
-        assert!(storage.exists(&address));
+        assert!(storage.exists(&address).await.expect("exists"));
     }
 
     #[tokio::test]
@@ -386,12 +417,12 @@ mod tests {
 
         // Store
         storage.put(&address, content).await.expect("put");
-        assert!(storage.exists(&address));
+        assert!(storage.exists(&address).await.expect("exists"));
 
         // Delete
         let deleted = storage.delete(&address).await.expect("delete");
         assert!(deleted);
-        assert!(!storage.exists(&address));
+        assert!(!storage.exists(&address).await.expect("exists"));
 
         // Delete again (already deleted)
         let deleted2 = storage.delete(&address).await.expect("delete 2");

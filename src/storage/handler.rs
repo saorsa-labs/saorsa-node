@@ -144,9 +144,15 @@ impl AntProtocol {
         }
 
         // 3. Check if already exists (idempotent success)
-        if self.storage.exists(&address) {
-            debug!("Chunk {} already exists", hex::encode(address));
-            return ChunkPutResponse::AlreadyExists { address };
+        match self.storage.exists(&address).await {
+            Ok(true) => {
+                debug!("Chunk {} already exists", hex::encode(address));
+                return ChunkPutResponse::AlreadyExists { address };
+            }
+            Err(e) => {
+                return ChunkPutResponse::Error(ProtocolError::StorageFailed(e.to_string()));
+            }
+            Ok(false) => {}
         }
 
         // 4. Verify payment
@@ -260,9 +266,12 @@ impl AntProtocol {
     }
 
     /// Check if a chunk exists locally.
-    #[must_use]
-    pub fn exists(&self, address: &[u8; 32]) -> bool {
-        self.storage.exists(address)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the filesystem check fails.
+    pub async fn exists(&self, address: &[u8; 32]) -> Result<bool> {
+        self.storage.exists(address).await
     }
 
     /// Get a chunk directly from local storage.
@@ -520,14 +529,14 @@ mod tests {
         let content = b"local access test";
         let address = DiskStorage::compute_address(content);
 
-        assert!(!protocol.exists(&address));
+        assert!(!protocol.exists(&address).await.expect("exists check"));
 
         protocol
             .put_local(&address, content)
             .await
             .expect("put local");
 
-        assert!(protocol.exists(&address));
+        assert!(protocol.exists(&address).await.expect("exists check"));
 
         let retrieved = protocol.get_local(&address).await.expect("get local");
         assert_eq!(retrieved, Some(content.to_vec()));
