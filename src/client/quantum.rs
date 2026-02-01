@@ -28,7 +28,7 @@ use saorsa_core::P2PNode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Default timeout for network operations in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -154,12 +154,39 @@ impl QuantumClient {
                     address: addr,
                     content,
                 }) => {
-                    debug!(
-                        "Found chunk {} on saorsa network ({} bytes)",
-                        hex::encode(addr),
-                        content.len()
-                    );
-                    Some(Ok(Some(DataChunk::new(addr, Bytes::from(content)))))
+                    if addr != *address {
+                        warn!(
+                            "Peer returned chunk {} but we requested {}",
+                            hex::encode(addr),
+                            addr_hex
+                        );
+                        Some(Err(Error::InvalidChunk(format!(
+                            "Mismatched chunk address: expected {}, got {}",
+                            addr_hex,
+                            hex::encode(addr)
+                        ))))
+                    } else {
+                        let computed = crate::client::compute_address(&content);
+                        if computed != addr {
+                            warn!(
+                                "Peer returned chunk {} with invalid content hash {}",
+                                addr_hex,
+                                hex::encode(computed)
+                            );
+                            Some(Err(Error::InvalidChunk(format!(
+                                "Invalid chunk content: expected hash {}, got {}",
+                                addr_hex,
+                                hex::encode(computed)
+                            ))))
+                        } else {
+                            debug!(
+                                "Found chunk {} on saorsa network ({} bytes)",
+                                hex::encode(addr),
+                                content.len()
+                            );
+                            Some(Ok(Some(DataChunk::new(addr, Bytes::from(content)))))
+                        }
+                    }
                 }
                 ChunkMessageBody::GetResponse(ChunkGetResponse::NotFound { .. }) => {
                     debug!("Chunk {} not found on saorsa network", addr_hex);

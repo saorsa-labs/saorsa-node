@@ -6,8 +6,9 @@
 use crate::ant_protocol::{ChunkMessage, ChunkMessageBody, CHUNK_PROTOCOL_ID};
 use saorsa_core::{P2PEvent, P2PNode};
 use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Send a chunk-protocol message to `target_peer` and await a matching response.
 ///
@@ -70,7 +71,11 @@ pub async fn send_and_await_chunk_response<T, E>(
                 }
             }
             Ok(Ok(_)) => {}
-            Ok(Err(_)) | Err(_) => break,
+            Ok(Err(RecvError::Lagged(skipped))) => {
+                debug!("Chunk protocol events lagged by {skipped} messages, continuing");
+                continue;
+            }
+            Ok(Err(RecvError::Closed)) | Err(_) => break,
         }
     }
 
