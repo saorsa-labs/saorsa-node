@@ -23,8 +23,8 @@ use crate::ant_protocol::{
 };
 use crate::error::{Error, Result};
 use bytes::Bytes;
-use rand::Rng;
 use saorsa_core::{P2PEvent, P2PNode};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -72,6 +72,7 @@ impl Default for QuantumConfig {
 pub struct QuantumClient {
     config: QuantumConfig,
     p2p_node: Option<Arc<P2PNode>>,
+    next_request_id: AtomicU64,
 }
 
 impl QuantumClient {
@@ -82,6 +83,7 @@ impl QuantumClient {
         Self {
             config,
             p2p_node: None,
+            next_request_id: AtomicU64::new(1),
         }
     }
 
@@ -130,7 +132,7 @@ impl QuantumClient {
         let mut events = node.subscribe_events();
 
         // Create and send GET request
-        let request_id: u64 = rand::thread_rng().gen();
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let request = ChunkGetRequest::new(*address);
         let message = ChunkMessage {
             request_id,
@@ -243,7 +245,7 @@ impl QuantumClient {
         })
         .map_err(|e| Error::Network(format!("Failed to serialize payment proof: {e}")))?;
 
-        let request_id: u64 = rand::thread_rng().gen();
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let request = ChunkPutRequest::with_payment(address, content.to_vec(), empty_payment);
         let message = ChunkMessage {
             request_id,
