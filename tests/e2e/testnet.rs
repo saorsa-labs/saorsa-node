@@ -5,7 +5,7 @@
 //!
 //! ## Protocol-Based Testing
 //!
-//! Each test node includes a `AntProtocol` handler that processes chunk
+//! Each test node includes an `AntProtocol` handler that processes chunk
 //! PUT/GET requests using the autonomi protocol messages. This allows E2E
 //! tests to validate the complete protocol flow including:
 //! - Message encoding/decoding (bincode serialization)
@@ -314,7 +314,7 @@ pub struct TestNode {
     /// Reference to the running P2P node.
     pub p2p_node: Option<Arc<P2PNode>>,
 
-    /// ANT protocol handler for processing chunk PUT/GET requests.
+    /// ANT protocol handler (`AntProtocol`) for processing chunk PUT/GET requests.
     pub ant_protocol: Option<Arc<AntProtocol>>,
 
     /// Is this a bootstrap node?
@@ -326,7 +326,10 @@ pub struct TestNode {
     /// Bootstrap addresses this node connects to.
     pub bootstrap_addrs: Vec<SocketAddr>,
 
-    /// Protocol handler background task.
+    /// Protocol handler background task handle.
+    ///
+    /// Populated once the node starts and the protocol router is spawned.
+    /// Dropped (and aborted) during teardown so tests don't leave tasks behind.
     protocol_task: Option<JoinHandle<()>>,
 }
 

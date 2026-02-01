@@ -227,8 +227,16 @@ impl AntProtocol {
             request.data_size
         );
 
-        // Validate data size - data_size is u64, cast carefully
-        let data_size_usize = usize::try_from(request.data_size).unwrap_or(usize::MAX);
+        // Validate data size - data_size is u64, cast carefully and reject overflow
+        let data_size_usize = match usize::try_from(request.data_size) {
+            Ok(size) => size,
+            Err(_) => {
+                return ChunkQuoteResponse::Error(ProtocolError::ChunkTooLarge {
+                    size: MAX_CHUNK_SIZE + 1,
+                    max_size: MAX_CHUNK_SIZE,
+                });
+            }
+        };
         if data_size_usize > MAX_CHUNK_SIZE {
             return ChunkQuoteResponse::Error(ProtocolError::ChunkTooLarge {
                 size: data_size_usize,

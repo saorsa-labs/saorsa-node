@@ -237,20 +237,21 @@ async fn test_node_to_node_messaging() {
     // Race all receivers concurrently instead of polling sequentially.
     // Pin the deadline sleep once so it tracks cumulative time across loop
     // iterations — otherwise select_all always wins the race against a
-    // freshly-created sleep and the timeout never fires.
+    // freshly-created sleep and the timeout never fires. Pinning prevents the
+    // timeout from being recreated on each loop iteration, which would reset
+    // its deadline.
     let timeout = tokio::time::sleep_until(deadline);
     tokio::pin!(timeout);
 
     while !received {
         let futs: Vec<_> = all_rx
             .iter_mut()
-            .enumerate()
-            .map(|(i, rx)| Box::pin(async move { (i, rx.recv().await) }))
+            .map(|rx| Box::pin(async move { rx.recv().await }))
             .collect();
 
         tokio::select! {
-            (result, idx, _remaining) = futures::future::select_all(futs) => {
-                if let (_, Ok(P2PEvent::Message { ref topic, ref data, .. })) = (idx, &result.1) {
+            (result, _idx, _remaining) = futures::future::select_all(futs) => {
+                if let Ok(P2PEvent::Message { ref topic, ref data, .. }) = result {
                     if topic == TEST_TOPIC && data.as_slice() == PAYLOAD {
                         received = true;
                     }
