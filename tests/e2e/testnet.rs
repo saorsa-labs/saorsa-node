@@ -18,8 +18,8 @@ use bytes::Bytes;
 use rand::Rng;
 use saorsa_core::{NodeConfig as CoreNodeConfig, P2PEvent, P2PNode};
 use saorsa_node::ant_protocol::{
-    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkPutRequest, ChunkPutResponse,
-    CHUNK_PROTOCOL_ID,
+    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
+    ChunkPutResponse, CHUNK_PROTOCOL_ID,
 };
 use saorsa_node::client::{DataChunk, XorName};
 use saorsa_node::payment::{
@@ -389,8 +389,12 @@ impl TestNode {
             TestnetError::Serialization(format!("Failed to serialize payment proof: {e}"))
         })?;
 
+        let request_id: u64 = rand::thread_rng().gen();
         let request = ChunkPutRequest::with_payment(address, data.to_vec(), empty_payment);
-        let message = ChunkMessage::PutRequest(request);
+        let message = ChunkMessage {
+            request_id,
+            body: ChunkMessageBody::PutRequest(request),
+        };
         let message_bytes = message.encode().map_err(|e| {
             TestnetError::Serialization(format!("Failed to encode PUT request: {e}"))
         })?;
@@ -410,12 +414,12 @@ impl TestNode {
         let response = ChunkMessage::decode(&response_bytes)
             .map_err(|e| TestnetError::Storage(format!("Failed to decode response: {e}")))?;
 
-        match response {
-            ChunkMessage::PutResponse(ChunkPutResponse::Success { address: addr }) => {
+        match response.body {
+            ChunkMessageBody::PutResponse(ChunkPutResponse::Success { address: addr }) => {
                 debug!("Node {} stored chunk at {}", self.index, hex::encode(addr));
                 Ok(addr)
             }
-            ChunkMessage::PutResponse(ChunkPutResponse::AlreadyExists { address: addr }) => {
+            ChunkMessageBody::PutResponse(ChunkPutResponse::AlreadyExists { address: addr }) => {
                 debug!(
                     "Node {} chunk already exists at {}",
                     self.index,
@@ -423,10 +427,10 @@ impl TestNode {
                 );
                 Ok(addr)
             }
-            ChunkMessage::PutResponse(ChunkPutResponse::PaymentRequired { message }) => Err(
+            ChunkMessageBody::PutResponse(ChunkPutResponse::PaymentRequired { message }) => Err(
                 TestnetError::Storage(format!("Payment required: {message}")),
             ),
-            ChunkMessage::PutResponse(ChunkPutResponse::Error(e)) => {
+            ChunkMessageBody::PutResponse(ChunkPutResponse::Error(e)) => {
                 Err(TestnetError::Storage(format!("Protocol error: {e}")))
             }
             _ => Err(TestnetError::Storage(
@@ -451,8 +455,12 @@ impl TestNode {
             .ok_or(TestnetError::NodeNotRunning)?;
 
         // Create GET request
+        let request_id: u64 = rand::thread_rng().gen();
         let request = ChunkGetRequest::new(*address);
-        let message = ChunkMessage::GetRequest(request);
+        let message = ChunkMessage {
+            request_id,
+            body: ChunkMessageBody::GetRequest(request),
+        };
         let message_bytes = message.encode().map_err(|e| {
             TestnetError::Serialization(format!("Failed to encode GET request: {e}"))
         })?;
@@ -472,8 +480,8 @@ impl TestNode {
         let response = ChunkMessage::decode(&response_bytes)
             .map_err(|e| TestnetError::Retrieval(format!("Failed to decode response: {e}")))?;
 
-        match response {
-            ChunkMessage::GetResponse(ChunkGetResponse::Success { address, content }) => {
+        match response.body {
+            ChunkMessageBody::GetResponse(ChunkGetResponse::Success { address, content }) => {
                 debug!(
                     "Node {} retrieved chunk {} ({} bytes)",
                     self.index,
@@ -482,7 +490,7 @@ impl TestNode {
                 );
                 Ok(Some(DataChunk::new(address, Bytes::from(content))))
             }
-            ChunkMessage::GetResponse(ChunkGetResponse::NotFound { address }) => {
+            ChunkMessageBody::GetResponse(ChunkGetResponse::NotFound { address }) => {
                 debug!(
                     "Node {} chunk not found: {}",
                     self.index,
@@ -490,7 +498,7 @@ impl TestNode {
                 );
                 Ok(None)
             }
-            ChunkMessage::GetResponse(ChunkGetResponse::Error(e)) => {
+            ChunkMessageBody::GetResponse(ChunkGetResponse::Error(e)) => {
                 Err(TestnetError::Retrieval(format!("Protocol error: {e}")))
             }
             _ => Err(TestnetError::Retrieval(
@@ -545,8 +553,12 @@ impl TestNode {
             TestnetError::Serialization(format!("Failed to serialize payment proof: {e}"))
         })?;
 
+        let request_id: u64 = rand::thread_rng().gen();
         let request = ChunkPutRequest::with_payment(address, data.to_vec(), empty_payment);
-        let message = ChunkMessage::PutRequest(request);
+        let message = ChunkMessage {
+            request_id,
+            body: ChunkMessageBody::PutRequest(request),
+        };
         let message_bytes = message.encode().map_err(|e| {
             TestnetError::Serialization(format!("Failed to encode PUT request: {e}"))
         })?;
@@ -558,7 +570,7 @@ impl TestNode {
                 TestnetError::Storage(format!("Failed to send PUT to remote node: {e}"))
             })?;
 
-        // Wait for response from the target
+        // Wait for response matching our request_id
         let timeout = Duration::from_secs(DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS);
         let deadline = Instant::now() + timeout;
 
@@ -567,14 +579,19 @@ impl TestNode {
             match tokio::time::timeout(remaining, events.recv()).await {
                 Ok(Ok(P2PEvent::Message {
                     topic,
-                    source,
                     data: resp_data,
-                })) if topic == CHUNK_PROTOCOL_ID && source == target_peer_id => {
+                    ..
+                })) if topic == CHUNK_PROTOCOL_ID => {
                     let response = ChunkMessage::decode(&resp_data).map_err(|e| {
                         TestnetError::Storage(format!("Failed to decode PUT response: {e}"))
                     })?;
-                    match response {
-                        ChunkMessage::PutResponse(ChunkPutResponse::Success { address: addr }) => {
+                    if response.request_id != request_id {
+                        continue; // Not our response, keep waiting
+                    }
+                    match response.body {
+                        ChunkMessageBody::PutResponse(ChunkPutResponse::Success {
+                            address: addr,
+                        }) => {
                             debug!(
                                 "Node {} stored chunk on peer {}: {}",
                                 self.index,
@@ -583,7 +600,7 @@ impl TestNode {
                             );
                             return Ok(addr);
                         }
-                        ChunkMessage::PutResponse(ChunkPutResponse::AlreadyExists {
+                        ChunkMessageBody::PutResponse(ChunkPutResponse::AlreadyExists {
                             address: addr,
                         }) => {
                             debug!(
@@ -594,14 +611,14 @@ impl TestNode {
                             );
                             return Ok(addr);
                         }
-                        ChunkMessage::PutResponse(ChunkPutResponse::PaymentRequired {
+                        ChunkMessageBody::PutResponse(ChunkPutResponse::PaymentRequired {
                             message,
                         }) => {
                             return Err(TestnetError::Storage(format!(
                                 "Payment required: {message}"
                             )));
                         }
-                        ChunkMessage::PutResponse(ChunkPutResponse::Error(e)) => {
+                        ChunkMessageBody::PutResponse(ChunkPutResponse::Error(e)) => {
                             return Err(TestnetError::Storage(format!(
                                 "Remote protocol error: {e}"
                             )));
@@ -609,7 +626,7 @@ impl TestNode {
                         _ => {} // Not a PUT response, keep waiting
                     }
                 }
-                Ok(Ok(_)) => {} // Different topic/source, keep waiting
+                Ok(Ok(_)) => {} // Different topic, keep waiting
                 Ok(Err(_)) | Err(_) => break,
             }
         }
@@ -661,8 +678,12 @@ impl TestNode {
         let mut events = p2p.subscribe_events();
 
         // Create GET request
+        let request_id: u64 = rand::thread_rng().gen();
         let request = ChunkGetRequest::new(*address);
-        let message = ChunkMessage::GetRequest(request);
+        let message = ChunkMessage {
+            request_id,
+            body: ChunkMessageBody::GetRequest(request),
+        };
         let message_bytes = message.encode().map_err(|e| {
             TestnetError::Serialization(format!("Failed to encode GET request: {e}"))
         })?;
@@ -674,7 +695,7 @@ impl TestNode {
                 TestnetError::Retrieval(format!("Failed to send GET to remote node: {e}"))
             })?;
 
-        // Wait for response from the target
+        // Wait for response matching our request_id
         let timeout = Duration::from_secs(DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS);
         let deadline = Instant::now() + timeout;
 
@@ -683,14 +704,17 @@ impl TestNode {
             match tokio::time::timeout(remaining, events.recv()).await {
                 Ok(Ok(P2PEvent::Message {
                     topic,
-                    source,
                     data: resp_data,
-                })) if topic == CHUNK_PROTOCOL_ID && source == target_peer_id => {
+                    ..
+                })) if topic == CHUNK_PROTOCOL_ID => {
                     let response = ChunkMessage::decode(&resp_data).map_err(|e| {
                         TestnetError::Retrieval(format!("Failed to decode GET response: {e}"))
                     })?;
-                    match response {
-                        ChunkMessage::GetResponse(ChunkGetResponse::Success {
+                    if response.request_id != request_id {
+                        continue; // Not our response, keep waiting
+                    }
+                    match response.body {
+                        ChunkMessageBody::GetResponse(ChunkGetResponse::Success {
                             address: addr,
                             content,
                         }) => {
@@ -703,7 +727,9 @@ impl TestNode {
                             );
                             return Ok(Some(DataChunk::new(addr, Bytes::from(content))));
                         }
-                        ChunkMessage::GetResponse(ChunkGetResponse::NotFound { address: addr }) => {
+                        ChunkMessageBody::GetResponse(ChunkGetResponse::NotFound {
+                            address: addr,
+                        }) => {
                             debug!(
                                 "Node {} chunk not found on peer {}: {}",
                                 self.index,
@@ -712,7 +738,7 @@ impl TestNode {
                             );
                             return Ok(None);
                         }
-                        ChunkMessage::GetResponse(ChunkGetResponse::Error(e)) => {
+                        ChunkMessageBody::GetResponse(ChunkGetResponse::Error(e)) => {
                             return Err(TestnetError::Retrieval(format!(
                                 "Remote protocol error: {e}"
                             )));
@@ -720,7 +746,7 @@ impl TestNode {
                         _ => {} // Not a GET response, keep waiting
                     }
                 }
-                Ok(Ok(_)) => {} // Different topic/source, keep waiting
+                Ok(Ok(_)) => {} // Different topic, keep waiting
                 Ok(Err(_)) | Err(_) => break,
             }
         }

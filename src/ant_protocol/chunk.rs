@@ -23,11 +23,11 @@ pub const DATA_TYPE_CHUNK: u32 = 0;
 /// Content-addressed identifier (32 bytes).
 pub type XorName = [u8; 32];
 
-/// Wrapper enum for all chunk protocol messages.
+/// Enum of all chunk protocol message types.
 ///
 /// Uses a single-byte discriminant for efficient wire encoding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ChunkMessage {
+pub enum ChunkMessageBody {
     /// Request to store a chunk.
     PutRequest(ChunkPutRequest),
     /// Response to a PUT request.
@@ -40,6 +40,20 @@ pub enum ChunkMessage {
     QuoteRequest(ChunkQuoteRequest),
     /// Response with a storage quote.
     QuoteResponse(ChunkQuoteResponse),
+}
+
+/// Wire-format wrapper that pairs a sender-assigned `request_id` with
+/// a [`ChunkMessageBody`].
+///
+/// The sender picks a unique `request_id`; the handler echoes it back
+/// in the response so callers can correlate replies by ID rather than
+/// by source peer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkMessage {
+    /// Sender-assigned identifier, echoed back in the response.
+    pub request_id: u64,
+    /// The protocol message body.
+    pub body: ChunkMessageBody,
 }
 
 impl ChunkMessage {
@@ -270,12 +284,16 @@ mod tests {
         let address = [0xAB; 32];
         let content = vec![1, 2, 3, 4, 5];
         let request = ChunkPutRequest::new(address, content.clone());
-        let msg = ChunkMessage::PutRequest(request);
+        let msg = ChunkMessage {
+            request_id: 42,
+            body: ChunkMessageBody::PutRequest(request),
+        };
 
         let encoded = msg.encode().expect("encode should succeed");
         let decoded = ChunkMessage::decode(&encoded).expect("decode should succeed");
 
-        if let ChunkMessage::PutRequest(req) = decoded {
+        assert_eq!(decoded.request_id, 42);
+        if let ChunkMessageBody::PutRequest(req) = decoded.body {
             assert_eq!(req.address, address);
             assert_eq!(req.content, content);
             assert!(req.payment_proof.is_none());
@@ -300,12 +318,16 @@ mod tests {
     fn test_get_request_encode_decode() {
         let address = [0xCD; 32];
         let request = ChunkGetRequest::new(address);
-        let msg = ChunkMessage::GetRequest(request);
+        let msg = ChunkMessage {
+            request_id: 7,
+            body: ChunkMessageBody::GetRequest(request),
+        };
 
         let encoded = msg.encode().expect("encode should succeed");
         let decoded = ChunkMessage::decode(&encoded).expect("decode should succeed");
 
-        if let ChunkMessage::GetRequest(req) = decoded {
+        assert_eq!(decoded.request_id, 7);
+        if let ChunkMessageBody::GetRequest(req) = decoded.body {
             assert_eq!(req.address, address);
         } else {
             panic!("expected GetRequest");
@@ -316,12 +338,18 @@ mod tests {
     fn test_put_response_success() {
         let address = [0xEF; 32];
         let response = ChunkPutResponse::Success { address };
-        let msg = ChunkMessage::PutResponse(response);
+        let msg = ChunkMessage {
+            request_id: 99,
+            body: ChunkMessageBody::PutResponse(response),
+        };
 
         let encoded = msg.encode().expect("encode should succeed");
         let decoded = ChunkMessage::decode(&encoded).expect("decode should succeed");
 
-        if let ChunkMessage::PutResponse(ChunkPutResponse::Success { address: addr }) = decoded {
+        assert_eq!(decoded.request_id, 99);
+        if let ChunkMessageBody::PutResponse(ChunkPutResponse::Success { address: addr }) =
+            decoded.body
+        {
             assert_eq!(addr, address);
         } else {
             panic!("expected PutResponse::Success");
@@ -332,12 +360,18 @@ mod tests {
     fn test_get_response_not_found() {
         let address = [0x12; 32];
         let response = ChunkGetResponse::NotFound { address };
-        let msg = ChunkMessage::GetResponse(response);
+        let msg = ChunkMessage {
+            request_id: 0,
+            body: ChunkMessageBody::GetResponse(response),
+        };
 
         let encoded = msg.encode().expect("encode should succeed");
         let decoded = ChunkMessage::decode(&encoded).expect("decode should succeed");
 
-        if let ChunkMessage::GetResponse(ChunkGetResponse::NotFound { address: addr }) = decoded {
+        assert_eq!(decoded.request_id, 0);
+        if let ChunkMessageBody::GetResponse(ChunkGetResponse::NotFound { address: addr }) =
+            decoded.body
+        {
             assert_eq!(addr, address);
         } else {
             panic!("expected GetResponse::NotFound");
@@ -348,12 +382,16 @@ mod tests {
     fn test_quote_request_encode_decode() {
         let address = [0x34; 32];
         let request = ChunkQuoteRequest::new(address, 1024);
-        let msg = ChunkMessage::QuoteRequest(request);
+        let msg = ChunkMessage {
+            request_id: 1,
+            body: ChunkMessageBody::QuoteRequest(request),
+        };
 
         let encoded = msg.encode().expect("encode should succeed");
         let decoded = ChunkMessage::decode(&encoded).expect("decode should succeed");
 
-        if let ChunkMessage::QuoteRequest(req) = decoded {
+        assert_eq!(decoded.request_id, 1);
+        if let ChunkMessageBody::QuoteRequest(req) = decoded.body {
             assert_eq!(req.address, address);
             assert_eq!(req.data_size, 1024);
             assert_eq!(req.data_type, DATA_TYPE_CHUNK);

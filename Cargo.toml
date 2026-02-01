@@ -73,6 +73,7 @@ hex = "0.4"
 # Utilities
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
 tempfile = "3"
 
 # Archive extraction for auto-upgrade
@@ -86,7 +87,6 @@ bincode = "1"
 tokio-test = "0.4"
 proptest = "1"
 serde_json = "1"
-rand = "0.8"
 
 # E2E test infrastructure
 [[test]]

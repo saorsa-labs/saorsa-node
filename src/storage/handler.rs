@@ -27,9 +27,9 @@
 //! ```
 
 use crate::ant_protocol::{
-    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkPutRequest, ChunkPutResponse,
-    ChunkQuoteRequest, ChunkQuoteResponse, ProtocolError, CHUNK_PROTOCOL_ID, DATA_TYPE_CHUNK,
-    MAX_CHUNK_SIZE,
+    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
+    ChunkPutResponse, ChunkQuoteRequest, ChunkQuoteResponse, ProtocolError, CHUNK_PROTOCOL_ID,
+    DATA_TYPE_CHUNK, MAX_CHUNK_SIZE,
 };
 use crate::error::Result;
 use crate::payment::{PaymentVerifier, QuoteGenerator};
@@ -100,19 +100,30 @@ impl AntProtocol {
         let message = ChunkMessage::decode(data)
             .map_err(|e| crate::error::Error::Protocol(format!("Failed to decode message: {e}")))?;
 
-        let response = match message {
-            ChunkMessage::PutRequest(req) => ChunkMessage::PutResponse(self.handle_put(req).await),
-            ChunkMessage::GetRequest(req) => ChunkMessage::GetResponse(self.handle_get(req).await),
-            ChunkMessage::QuoteRequest(ref req) => {
-                ChunkMessage::QuoteResponse(self.handle_quote(req))
+        let request_id = message.request_id;
+
+        let response_body = match message.body {
+            ChunkMessageBody::PutRequest(req) => {
+                ChunkMessageBody::PutResponse(self.handle_put(req).await)
+            }
+            ChunkMessageBody::GetRequest(req) => {
+                ChunkMessageBody::GetResponse(self.handle_get(req).await)
+            }
+            ChunkMessageBody::QuoteRequest(ref req) => {
+                ChunkMessageBody::QuoteResponse(self.handle_quote(req))
             }
             // Response messages shouldn't be received as requests
-            ChunkMessage::PutResponse(_)
-            | ChunkMessage::GetResponse(_)
-            | ChunkMessage::QuoteResponse(_) => {
+            ChunkMessageBody::PutResponse(_)
+            | ChunkMessageBody::GetResponse(_)
+            | ChunkMessageBody::QuoteResponse(_) => {
                 let error = ProtocolError::Internal("Unexpected response message".to_string());
-                ChunkMessage::PutResponse(ChunkPutResponse::Error(error))
+                ChunkMessageBody::PutResponse(ChunkPutResponse::Error(error))
             }
+        };
+
+        let response = ChunkMessage {
+            request_id,
+            body: response_body,
         };
 
         response
@@ -343,7 +354,10 @@ mod tests {
             })
             .unwrap(),
         );
-        let put_msg = ChunkMessage::PutRequest(put_request);
+        let put_msg = ChunkMessage {
+            request_id: 1,
+            body: ChunkMessageBody::PutRequest(put_request),
+        };
         let put_bytes = put_msg.encode().expect("encode put");
 
         // Handle PUT
@@ -353,7 +367,10 @@ mod tests {
             .expect("handle put");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::PutResponse(ChunkPutResponse::Success { address: addr }) = response {
+        assert_eq!(response.request_id, 1);
+        if let ChunkMessageBody::PutResponse(ChunkPutResponse::Success { address: addr }) =
+            response.body
+        {
             assert_eq!(addr, address);
         } else {
             panic!("expected PutResponse::Success, got: {response:?}");
@@ -361,7 +378,10 @@ mod tests {
 
         // Create GET request
         let get_request = ChunkGetRequest::new(address);
-        let get_msg = ChunkMessage::GetRequest(get_request);
+        let get_msg = ChunkMessage {
+            request_id: 2,
+            body: ChunkMessageBody::GetRequest(get_request),
+        };
         let get_bytes = get_msg.encode().expect("encode get");
 
         // Handle GET
@@ -371,10 +391,11 @@ mod tests {
             .expect("handle get");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::GetResponse(ChunkGetResponse::Success {
+        assert_eq!(response.request_id, 2);
+        if let ChunkMessageBody::GetResponse(ChunkGetResponse::Success {
             address: addr,
             content: data,
-        }) = response
+        }) = response.body
         {
             assert_eq!(addr, address);
             assert_eq!(data, content.to_vec());
@@ -389,7 +410,10 @@ mod tests {
 
         let address = [0xAB; 32];
         let get_request = ChunkGetRequest::new(address);
-        let get_msg = ChunkMessage::GetRequest(get_request);
+        let get_msg = ChunkMessage {
+            request_id: 10,
+            body: ChunkMessageBody::GetRequest(get_request),
+        };
         let get_bytes = get_msg.encode().expect("encode get");
 
         let response_bytes = protocol
@@ -398,7 +422,10 @@ mod tests {
             .expect("handle get");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::GetResponse(ChunkGetResponse::NotFound { address: addr }) = response {
+        assert_eq!(response.request_id, 10);
+        if let ChunkMessageBody::GetResponse(ChunkGetResponse::NotFound { address: addr }) =
+            response.body
+        {
             assert_eq!(addr, address);
         } else {
             panic!("expected GetResponse::NotFound");
@@ -420,7 +447,10 @@ mod tests {
             })
             .unwrap(),
         );
-        let put_msg = ChunkMessage::PutRequest(put_request);
+        let put_msg = ChunkMessage {
+            request_id: 20,
+            body: ChunkMessageBody::PutRequest(put_request),
+        };
         let put_bytes = put_msg.encode().expect("encode put");
 
         let response_bytes = protocol
@@ -429,9 +459,10 @@ mod tests {
             .expect("handle put");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::PutResponse(ChunkPutResponse::Error(
+        assert_eq!(response.request_id, 20);
+        if let ChunkMessageBody::PutResponse(ChunkPutResponse::Error(
             ProtocolError::AddressMismatch { .. },
-        )) = response
+        )) = response.body
         {
             // Expected
         } else {
@@ -448,7 +479,10 @@ mod tests {
         let address = DiskStorage::compute_address(&content);
 
         let put_request = ChunkPutRequest::new(address, content);
-        let put_msg = ChunkMessage::PutRequest(put_request);
+        let put_msg = ChunkMessage {
+            request_id: 30,
+            body: ChunkMessageBody::PutRequest(put_request),
+        };
         let put_bytes = put_msg.encode().expect("encode put");
 
         let response_bytes = protocol
@@ -457,9 +491,10 @@ mod tests {
             .expect("handle put");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::PutResponse(ChunkPutResponse::Error(ProtocolError::ChunkTooLarge {
-            ..
-        })) = response
+        assert_eq!(response.request_id, 30);
+        if let ChunkMessageBody::PutResponse(ChunkPutResponse::Error(
+            ProtocolError::ChunkTooLarge { .. },
+        )) = response.body
         {
             // Expected
         } else {
@@ -483,7 +518,10 @@ mod tests {
             })
             .unwrap(),
         );
-        let put_msg = ChunkMessage::PutRequest(put_request);
+        let put_msg = ChunkMessage {
+            request_id: 40,
+            body: ChunkMessageBody::PutRequest(put_request),
+        };
         let put_bytes = put_msg.encode().expect("encode put");
 
         let _ = protocol
@@ -498,8 +536,9 @@ mod tests {
             .expect("handle put 2");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::PutResponse(ChunkPutResponse::AlreadyExists { address: addr }) =
-            response
+        assert_eq!(response.request_id, 40);
+        if let ChunkMessageBody::PutResponse(ChunkPutResponse::AlreadyExists { address: addr }) =
+            response.body
         {
             assert_eq!(addr, address);
         } else {

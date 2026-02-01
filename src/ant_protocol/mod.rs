@@ -50,7 +50,7 @@ pub mod chunk;
 
 // Re-export chunk types for convenience
 pub use chunk::{
-    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkPutRequest, ChunkPutResponse,
-    ChunkQuoteRequest, ChunkQuoteResponse, ProtocolError, XorName, CHUNK_PROTOCOL_ID,
-    DATA_TYPE_CHUNK, MAX_CHUNK_SIZE, PROTOCOL_VERSION,
+    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
+    ChunkPutResponse, ChunkQuoteRequest, ChunkQuoteResponse, ProtocolError, XorName,
+    CHUNK_PROTOCOL_ID, DATA_TYPE_CHUNK, MAX_CHUNK_SIZE, PROTOCOL_VERSION,
 };

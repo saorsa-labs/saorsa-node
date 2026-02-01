@@ -18,12 +18,13 @@
 
 use super::data_types::{DataChunk, XorName};
 use crate::ant_protocol::{
-    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkPutRequest, ChunkPutResponse,
-    CHUNK_PROTOCOL_ID,
+    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
+    ChunkPutResponse, CHUNK_PROTOCOL_ID,
 };
 use crate::error::{Error, Result};
 use bytes::Bytes;
 use saorsa_core::{P2PEvent, P2PNode};
+use rand::Rng;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -129,8 +130,12 @@ impl QuantumClient {
         let mut events = node.subscribe_events();
 
         // Create and send GET request
+        let request_id: u64 = rand::thread_rng().gen();
         let request = ChunkGetRequest::new(*address);
-        let message = ChunkMessage::GetRequest(request);
+        let message = ChunkMessage {
+            request_id,
+            body: ChunkMessageBody::GetRequest(request),
+        };
         let message_bytes = message
             .encode()
             .map_err(|e| Error::Network(format!("Failed to encode GET request: {e}")))?;
@@ -141,23 +146,22 @@ impl QuantumClient {
                 Error::Network(format!("Failed to send GET to peer {target_peer}: {e}"))
             })?;
 
-        // Wait for response from the target
+        // Wait for response matching our request_id
         let timeout = Duration::from_secs(self.config.timeout_secs);
         let deadline = Instant::now() + timeout;
 
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match tokio::time::timeout(remaining, events.recv()).await {
-                Ok(Ok(P2PEvent::Message {
-                    topic,
-                    source,
-                    data,
-                })) if topic == CHUNK_PROTOCOL_ID && source == target_peer => {
+                Ok(Ok(P2PEvent::Message { topic, data, .. })) if topic == CHUNK_PROTOCOL_ID => {
                     let response = ChunkMessage::decode(&data).map_err(|e| {
                         Error::Network(format!("Failed to decode GET response: {e}"))
                     })?;
-                    match response {
-                        ChunkMessage::GetResponse(ChunkGetResponse::Success {
+                    if response.request_id != request_id {
+                        continue; // Not our response, keep waiting
+                    }
+                    match response.body {
+                        ChunkMessageBody::GetResponse(ChunkGetResponse::Success {
                             address: addr,
                             content,
                         }) => {
@@ -168,11 +172,11 @@ impl QuantumClient {
                             );
                             return Ok(Some(DataChunk::new(addr, Bytes::from(content))));
                         }
-                        ChunkMessage::GetResponse(ChunkGetResponse::NotFound { .. }) => {
+                        ChunkMessageBody::GetResponse(ChunkGetResponse::NotFound { .. }) => {
                             debug!("Chunk {} not found on saorsa network", hex::encode(address));
                             return Ok(None);
                         }
-                        ChunkMessage::GetResponse(ChunkGetResponse::Error(e)) => {
+                        ChunkMessageBody::GetResponse(ChunkGetResponse::Error(e)) => {
                             return Err(Error::Network(format!(
                                 "Remote GET error for {}: {e}",
                                 hex::encode(address)
@@ -181,7 +185,7 @@ impl QuantumClient {
                         _ => {} // Not a GET response, keep waiting
                     }
                 }
-                Ok(Ok(_)) => {} // Different topic/source, keep waiting
+                Ok(Ok(_)) => {} // Different topic, keep waiting
                 Ok(Err(_)) | Err(_) => break,
             }
         }
@@ -231,8 +235,12 @@ impl QuantumClient {
         })
         .map_err(|e| Error::Network(format!("Failed to serialize payment proof: {e}")))?;
 
+        let request_id: u64 = rand::thread_rng().gen();
         let request = ChunkPutRequest::with_payment(address, content.to_vec(), empty_payment);
-        let message = ChunkMessage::PutRequest(request);
+        let message = ChunkMessage {
+            request_id,
+            body: ChunkMessageBody::PutRequest(request),
+        };
         let message_bytes = message
             .encode()
             .map_err(|e| Error::Network(format!("Failed to encode PUT request: {e}")))?;
@@ -244,23 +252,24 @@ impl QuantumClient {
                 Error::Network(format!("Failed to send PUT to peer {target_peer}: {e}"))
             })?;
 
-        // Wait for response from the target
+        // Wait for response matching our request_id
         let timeout = Duration::from_secs(self.config.timeout_secs);
         let deadline = Instant::now() + timeout;
 
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match tokio::time::timeout(remaining, events.recv()).await {
-                Ok(Ok(P2PEvent::Message {
-                    topic,
-                    source,
-                    data,
-                })) if topic == CHUNK_PROTOCOL_ID && source == target_peer => {
+                Ok(Ok(P2PEvent::Message { topic, data, .. })) if topic == CHUNK_PROTOCOL_ID => {
                     let response = ChunkMessage::decode(&data).map_err(|e| {
                         Error::Network(format!("Failed to decode PUT response: {e}"))
                     })?;
-                    match response {
-                        ChunkMessage::PutResponse(ChunkPutResponse::Success { address: addr }) => {
+                    if response.request_id != request_id {
+                        continue; // Not our response, keep waiting
+                    }
+                    match response.body {
+                        ChunkMessageBody::PutResponse(ChunkPutResponse::Success {
+                            address: addr,
+                        }) => {
                             info!(
                                 "Chunk stored at address: {} ({} bytes)",
                                 hex::encode(addr),
@@ -268,18 +277,18 @@ impl QuantumClient {
                             );
                             return Ok(addr);
                         }
-                        ChunkMessage::PutResponse(ChunkPutResponse::AlreadyExists {
+                        ChunkMessageBody::PutResponse(ChunkPutResponse::AlreadyExists {
                             address: addr,
                         }) => {
                             info!("Chunk already exists at address: {}", hex::encode(addr));
                             return Ok(addr);
                         }
-                        ChunkMessage::PutResponse(ChunkPutResponse::PaymentRequired {
+                        ChunkMessageBody::PutResponse(ChunkPutResponse::PaymentRequired {
                             message,
                         }) => {
                             return Err(Error::Network(format!("Payment required: {message}")));
                         }
-                        ChunkMessage::PutResponse(ChunkPutResponse::Error(e)) => {
+                        ChunkMessageBody::PutResponse(ChunkPutResponse::Error(e)) => {
                             return Err(Error::Network(format!(
                                 "Remote PUT error for {}: {e}",
                                 hex::encode(address)
@@ -288,7 +297,7 @@ impl QuantumClient {
                         _ => {} // Not a PUT response, keep waiting
                     }
                 }
-                Ok(Ok(_)) => {} // Different topic/source, keep waiting
+                Ok(Ok(_)) => {} // Different topic, keep waiting
                 Ok(Err(_)) | Err(_) => break,
             }
         }
