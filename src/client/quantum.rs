@@ -23,6 +23,7 @@ use crate::ant_protocol::{
 };
 use crate::error::{Error, Result};
 use bytes::Bytes;
+use rand::seq::IteratorRandom;
 use saorsa_core::{P2PEvent, P2PNode};
 use std::sync::Arc;
 use std::time::Duration;
@@ -324,12 +325,13 @@ impl QuantumClient {
         self.get_chunk(address).await.map(|opt| opt.is_some())
     }
 
-    /// Pick a target peer from the connected peers list.
+    /// Pick a random target peer from the connected peers list.
     async fn pick_target_peer(node: &P2PNode) -> Result<String> {
         let peers = node.connected_peers().await;
+        let mut rng = rand::thread_rng();
         peers
             .into_iter()
-            .next()
+            .choose(&mut rng)
             .ok_or_else(|| Error::Network("No connected peers available".into()))
     }
 }
