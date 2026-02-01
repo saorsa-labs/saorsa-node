@@ -517,7 +517,9 @@ impl TestNode {
             .p2p_node
             .as_ref()
             .ok_or(TestnetError::NodeNotRunning)?;
-        let target_peer_id = target_p2p.peer_id().clone();
+        let target_peer_id = target_p2p
+            .transport_peer_id()
+            .ok_or_else(|| TestnetError::Core("No transport peer ID available".to_string()))?;
         self.store_chunk_on_peer(&target_peer_id, data).await
     }
 
@@ -635,7 +637,9 @@ impl TestNode {
             .p2p_node
             .as_ref()
             .ok_or(TestnetError::NodeNotRunning)?;
-        let target_peer_id = target_p2p.peer_id().clone();
+        let target_peer_id = target_p2p
+            .transport_peer_id()
+            .ok_or_else(|| TestnetError::Core("No transport peer ID available".to_string()))?;
         self.get_chunk_from_peer(&target_peer_id, address).await
     }
 
