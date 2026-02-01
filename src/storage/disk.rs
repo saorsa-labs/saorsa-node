@@ -194,20 +194,13 @@ impl DiskStorage {
             stats.bytes_stored += content.len() as u64;
         }
 
-        // Release and evict the per-address lock now that the file is on disk.
-        // The file itself acts as the durable guard: subsequent puts will see it
-        // exists before acquiring the lock.
+        // Release the per-address lock. We intentionally keep the entry in
+        // `address_locks` — it is a cheap empty Mutex<()> and will be reused on
+        // subsequent puts to the same address. Attempting to evict based on
+        // `Arc::strong_count` is racy and documented as unreliable for
+        // synchronization. The map is bounded by the number of unique addresses
+        // stored, which is already bounded by `max_chunks`.
         drop(guard);
-        {
-            let mut locks = self.address_locks.lock().await;
-            // Only remove if we hold the last strong reference (no other put()
-            // call is waiting on this lock).
-            if let std::collections::hash_map::Entry::Occupied(entry) = locks.entry(*address) {
-                if Arc::strong_count(entry.get()) == 1 {
-                    entry.remove();
-                }
-            }
-        }
 
         debug!(
             "Stored chunk {} ({} bytes)",

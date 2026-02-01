@@ -143,27 +143,7 @@ impl AntProtocol {
             };
         }
 
-        // 2. Check if already exists (idempotent success)
-        // Note: content-address verification (SHA256(content) == address) is handled
-        // by DiskStorage::put() which is the authoritative check.
-        match self.storage.exists(&address).await {
-            Ok(true) => {
-                debug!("Chunk {} already exists", hex::encode(address));
-                return ChunkPutResponse::AlreadyExists {
-                    request_id: rid,
-                    address,
-                };
-            }
-            Err(e) => {
-                return ChunkPutResponse::Error {
-                    request_id: rid,
-                    error: ProtocolError::StorageFailed(e.to_string()),
-                };
-            }
-            Ok(false) => {}
-        }
-
-        // 3. Verify payment
+        // 2. Verify payment
         let payment_result = self
             .payment_verifier
             .verify_payment(&address, request.payment_proof.as_deref())
@@ -187,9 +167,13 @@ impl AntProtocol {
             }
         }
 
-        // 4. Store to disk
+        // 3. Store to disk.
+        // DiskStorage::put() is the authoritative check for existence and
+        // content-address verification, all under a per-address lock. We rely
+        // on its return value to distinguish new stores from duplicates rather
+        // than doing a separate exists() call which would be racy (TOCTOU).
         match self.storage.put(&address, &request.content).await {
-            Ok(_) => {
+            Ok(true) => {
                 info!(
                     "Stored chunk {} ({} bytes)",
                     hex::encode(address),
@@ -198,6 +182,13 @@ impl AntProtocol {
                 // Record the store in metrics
                 self.quote_generator.record_store(DATA_TYPE_CHUNK);
                 ChunkPutResponse::Success {
+                    request_id: rid,
+                    address,
+                }
+            }
+            Ok(false) => {
+                debug!("Chunk {} already exists", hex::encode(address));
+                ChunkPutResponse::AlreadyExists {
                     request_id: rid,
                     address,
                 }

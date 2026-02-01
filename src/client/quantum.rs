@@ -69,6 +69,16 @@ impl Default for QuantumConfig {
 /// Chunks are content-addressed: the address is the SHA256 hash of the content.
 /// This ensures data integrity - if the content matches the address, the data
 /// is authentic. All chunk storage requires EVM payment on Arbitrum.
+///
+/// ## Concurrency
+///
+/// **This client is NOT safe for concurrent chunk operations.** Each call to
+/// [`get_chunk`](Self::get_chunk) or [`put_chunk`](Self::put_chunk) subscribes
+/// to the P2P broadcast event stream and filters responses by topic, source,
+/// and `request_id`. If multiple operations run concurrently against the same
+/// peer, one operation may consume another's response from the broadcast
+/// channel, causing the other to time out. Callers must serialize chunk
+/// operations or use separate `QuantumClient` instances per concurrent task.
 pub struct QuantumClient {
     config: QuantumConfig,
     p2p_node: Option<Arc<P2PNode>>,
