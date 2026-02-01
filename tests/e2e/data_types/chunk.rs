@@ -299,7 +299,7 @@ mod tests {
         // - Verify payment was validated
     }
 
-    /// Test 8: Reject oversized chunk (> 4MB).
+    /// Test 10: Reject oversized chunk (> 4MB).
     ///
     /// Chunks have a maximum size of 4MB. Attempting to store a larger
     /// chunk should fail with an appropriate error.

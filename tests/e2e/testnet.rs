@@ -411,11 +411,13 @@ impl TestNode {
             .map_err(|e| TestnetError::Storage(format!("Failed to decode response: {e}")))?;
 
         match response {
-            ChunkMessage::PutResponse(ChunkPutResponse::Success { address: addr }) => {
+            ChunkMessage::PutResponse(ChunkPutResponse::Success { address: addr, .. }) => {
                 debug!("Node {} stored chunk at {}", self.index, hex::encode(addr));
                 Ok(addr)
             }
-            ChunkMessage::PutResponse(ChunkPutResponse::AlreadyExists { address: addr }) => {
+            ChunkMessage::PutResponse(ChunkPutResponse::AlreadyExists {
+                address: addr, ..
+            }) => {
                 debug!(
                     "Node {} chunk already exists at {}",
                     self.index,
@@ -423,10 +425,10 @@ impl TestNode {
                 );
                 Ok(addr)
             }
-            ChunkMessage::PutResponse(ChunkPutResponse::PaymentRequired { message }) => Err(
+            ChunkMessage::PutResponse(ChunkPutResponse::PaymentRequired { message, .. }) => Err(
                 TestnetError::Storage(format!("Payment required: {message}")),
             ),
-            ChunkMessage::PutResponse(ChunkPutResponse::Error(e)) => {
+            ChunkMessage::PutResponse(ChunkPutResponse::Error { error: e, .. }) => {
                 Err(TestnetError::Storage(format!("Protocol error: {e}")))
             }
             _ => Err(TestnetError::Storage(
@@ -473,7 +475,9 @@ impl TestNode {
             .map_err(|e| TestnetError::Retrieval(format!("Failed to decode response: {e}")))?;
 
         match response {
-            ChunkMessage::GetResponse(ChunkGetResponse::Success { address, content }) => {
+            ChunkMessage::GetResponse(ChunkGetResponse::Success {
+                address, content, ..
+            }) => {
                 debug!(
                     "Node {} retrieved chunk {} ({} bytes)",
                     self.index,
@@ -482,7 +486,7 @@ impl TestNode {
                 );
                 Ok(Some(DataChunk::new(address, Bytes::from(content))))
             }
-            ChunkMessage::GetResponse(ChunkGetResponse::NotFound { address }) => {
+            ChunkMessage::GetResponse(ChunkGetResponse::NotFound { address, .. }) => {
                 debug!(
                     "Node {} chunk not found: {}",
                     self.index,
@@ -490,7 +494,7 @@ impl TestNode {
                 );
                 Ok(None)
             }
-            ChunkMessage::GetResponse(ChunkGetResponse::Error(e)) => {
+            ChunkMessage::GetResponse(ChunkGetResponse::Error { error: e, .. }) => {
                 Err(TestnetError::Retrieval(format!("Protocol error: {e}")))
             }
             _ => Err(TestnetError::Retrieval(
@@ -574,7 +578,10 @@ impl TestNode {
                         TestnetError::Storage(format!("Failed to decode PUT response: {e}"))
                     })?;
                     match response {
-                        ChunkMessage::PutResponse(ChunkPutResponse::Success { address: addr }) => {
+                        ChunkMessage::PutResponse(ChunkPutResponse::Success {
+                            address: addr,
+                            ..
+                        }) => {
                             debug!(
                                 "Node {} stored chunk on peer {}: {}",
                                 self.index,
@@ -585,6 +592,7 @@ impl TestNode {
                         }
                         ChunkMessage::PutResponse(ChunkPutResponse::AlreadyExists {
                             address: addr,
+                            ..
                         }) => {
                             debug!(
                                 "Node {} chunk already exists on peer {}: {}",
@@ -596,12 +604,13 @@ impl TestNode {
                         }
                         ChunkMessage::PutResponse(ChunkPutResponse::PaymentRequired {
                             message,
+                            ..
                         }) => {
                             return Err(TestnetError::Storage(format!(
                                 "Payment required: {message}"
                             )));
                         }
-                        ChunkMessage::PutResponse(ChunkPutResponse::Error(e)) => {
+                        ChunkMessage::PutResponse(ChunkPutResponse::Error { error: e, .. }) => {
                             return Err(TestnetError::Storage(format!(
                                 "Remote protocol error: {e}"
                             )));
@@ -693,6 +702,7 @@ impl TestNode {
                         ChunkMessage::GetResponse(ChunkGetResponse::Success {
                             address: addr,
                             content,
+                            ..
                         }) => {
                             debug!(
                                 "Node {} retrieved chunk from peer {}: {} ({} bytes)",
@@ -703,7 +713,10 @@ impl TestNode {
                             );
                             return Ok(Some(DataChunk::new(addr, Bytes::from(content))));
                         }
-                        ChunkMessage::GetResponse(ChunkGetResponse::NotFound { address: addr }) => {
+                        ChunkMessage::GetResponse(ChunkGetResponse::NotFound {
+                            address: addr,
+                            ..
+                        }) => {
                             debug!(
                                 "Node {} chunk not found on peer {}: {}",
                                 self.index,
@@ -712,7 +725,7 @@ impl TestNode {
                             );
                             return Ok(None);
                         }
-                        ChunkMessage::GetResponse(ChunkGetResponse::Error(e)) => {
+                        ChunkMessage::GetResponse(ChunkGetResponse::Error { error: e, .. }) => {
                             return Err(TestnetError::Retrieval(format!(
                                 "Remote protocol error: {e}"
                             )));

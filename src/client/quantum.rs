@@ -131,6 +131,7 @@ impl QuantumClient {
 
         // Create and send GET request
         let request = ChunkGetRequest::new(*address);
+        let expected_rid = request.request_id;
         let message = ChunkMessage::GetRequest(request);
         let message_bytes = message
             .encode()
@@ -142,7 +143,7 @@ impl QuantumClient {
                 Error::Network(format!("Failed to send GET to peer {target_peer}: {e}"))
             })?;
 
-        // Wait for response from the target
+        // Wait for response from the target, matching on request_id
         let timeout = Duration::from_secs(self.config.timeout_secs);
         let deadline = Instant::now() + timeout;
 
@@ -159,9 +160,10 @@ impl QuantumClient {
                     })?;
                     match response {
                         ChunkMessage::GetResponse(ChunkGetResponse::Success {
+                            request_id,
                             address: addr,
                             content,
-                        }) => {
+                        }) if request_id == expected_rid => {
                             debug!(
                                 "Found chunk {} on saorsa network ({} bytes)",
                                 hex::encode(addr),
@@ -169,18 +171,24 @@ impl QuantumClient {
                             );
                             return Ok(Some(DataChunk::new(addr, Bytes::from(content))));
                         }
-                        ChunkMessage::GetResponse(ChunkGetResponse::NotFound { .. }) => {
+                        ChunkMessage::GetResponse(ChunkGetResponse::NotFound {
+                            request_id,
+                            ..
+                        }) if request_id == expected_rid => {
                             debug!("Chunk {} not found on saorsa network", hex::encode(address));
                             return Ok(None);
                         }
-                        ChunkMessage::GetResponse(ChunkGetResponse::Error(e)) => {
+                        ChunkMessage::GetResponse(ChunkGetResponse::Error {
+                            request_id,
+                            error: e,
+                        }) if request_id == expected_rid => {
                             return Err(Error::Network(format!(
                                 "Remote GET error for {}: {e}",
                                 hex::encode(address)
                             )));
                         }
                         other => {
-                            trace!("Discarding non-GET-response while waiting: {other:?}");
+                            trace!("Discarding non-matching message while waiting for GET response: {other:?}");
                         }
                     }
                 }
@@ -201,6 +209,14 @@ impl QuantumClient {
     /// The chunk address is computed as SHA256(content), ensuring content-addressing.
     /// Sends a `ChunkPutRequest` to a connected peer and waits for the
     /// `ChunkPutResponse`.
+    ///
+    /// # Payment
+    ///
+    /// **Currently sends an empty `ProofOfPayment`**, which only succeeds when
+    /// EVM verification is disabled on the receiving node. Production usage
+    /// requires obtaining a quote via `ChunkQuoteRequest`, paying on-chain, and
+    /// passing the resulting proof. This will be addressed when the full payment
+    /// flow is integrated.
     ///
     /// # Arguments
     ///
@@ -228,13 +244,18 @@ impl QuantumClient {
         // Compute content address using SHA-256
         let address = crate::ant_protocol::compute_address(&content);
 
-        // Create PUT request with empty payment proof
+        // Create PUT request with empty payment proof.
+        //
+        // NOTE: This always sends an empty `ProofOfPayment`. It works only when
+        // EVM verification is disabled on the receiving node. Production usage
+        // will require a real payment proof obtained via the quote flow.
         let empty_payment = rmp_serde::to_vec(&ant_evm::ProofOfPayment {
             peer_quotes: vec![],
         })
         .map_err(|e| Error::Network(format!("Failed to serialize payment proof: {e}")))?;
 
         let request = ChunkPutRequest::with_payment(address, content.to_vec(), empty_payment);
+        let expected_rid = request.request_id;
         let message = ChunkMessage::PutRequest(request);
         let message_bytes = message
             .encode()
@@ -247,7 +268,7 @@ impl QuantumClient {
                 Error::Network(format!("Failed to send PUT to peer {target_peer}: {e}"))
             })?;
 
-        // Wait for response from the target
+        // Wait for response from the target, matching on request_id
         let timeout = Duration::from_secs(self.config.timeout_secs);
         let deadline = Instant::now() + timeout;
 
@@ -263,7 +284,10 @@ impl QuantumClient {
                         Error::Network(format!("Failed to decode PUT response: {e}"))
                     })?;
                     match response {
-                        ChunkMessage::PutResponse(ChunkPutResponse::Success { address: addr }) => {
+                        ChunkMessage::PutResponse(ChunkPutResponse::Success {
+                            request_id,
+                            address: addr,
+                        }) if request_id == expected_rid => {
                             info!(
                                 "Chunk stored at address: {} ({} bytes)",
                                 hex::encode(addr),
@@ -272,24 +296,29 @@ impl QuantumClient {
                             return Ok(addr);
                         }
                         ChunkMessage::PutResponse(ChunkPutResponse::AlreadyExists {
+                            request_id,
                             address: addr,
-                        }) => {
+                        }) if request_id == expected_rid => {
                             info!("Chunk already exists at address: {}", hex::encode(addr));
                             return Ok(addr);
                         }
                         ChunkMessage::PutResponse(ChunkPutResponse::PaymentRequired {
+                            request_id,
                             message,
-                        }) => {
+                        }) if request_id == expected_rid => {
                             return Err(Error::Network(format!("Payment required: {message}")));
                         }
-                        ChunkMessage::PutResponse(ChunkPutResponse::Error(e)) => {
+                        ChunkMessage::PutResponse(ChunkPutResponse::Error {
+                            request_id,
+                            error: e,
+                        }) if request_id == expected_rid => {
                             return Err(Error::Network(format!(
                                 "Remote PUT error for {}: {e}",
                                 hex::encode(address)
                             )));
                         }
                         other => {
-                            trace!("Discarding non-PUT-response while waiting: {other:?}");
+                            trace!("Discarding non-matching message while waiting for PUT response: {other:?}");
                         }
                     }
                 }
@@ -307,8 +336,10 @@ impl QuantumClient {
 
     /// Check if a chunk exists on the saorsa network.
     ///
-    /// Implemented via `get_chunk` — returns `Ok(true)` on success,
-    /// `Ok(false)` if not found.
+    /// **Note:** This delegates to [`get_chunk`](Self::get_chunk) and discards
+    /// the content, so it downloads the full chunk payload. For large chunks
+    /// this is wasteful. A dedicated `ChunkExistsRequest` message would be more
+    /// efficient but is not yet part of the protocol.
     ///
     /// # Arguments
     ///

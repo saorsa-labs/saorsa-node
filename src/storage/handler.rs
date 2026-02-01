@@ -128,15 +128,19 @@ impl AntProtocol {
 
     /// Handle a PUT request.
     async fn handle_put(&self, request: ChunkPutRequest) -> ChunkPutResponse {
+        let rid = request.request_id;
         let address = request.address;
         debug!("Handling PUT request for {}", hex::encode(address));
 
         // 1. Validate chunk size
         if request.content.len() > MAX_CHUNK_SIZE {
-            return ChunkPutResponse::Error(ProtocolError::ChunkTooLarge {
-                size: request.content.len(),
-                max_size: MAX_CHUNK_SIZE,
-            });
+            return ChunkPutResponse::Error {
+                request_id: rid,
+                error: ProtocolError::ChunkTooLarge {
+                    size: request.content.len(),
+                    max_size: MAX_CHUNK_SIZE,
+                },
+            };
         }
 
         // 2. Check if already exists (idempotent success)
@@ -145,15 +149,21 @@ impl AntProtocol {
         match self.storage.exists(&address).await {
             Ok(true) => {
                 debug!("Chunk {} already exists", hex::encode(address));
-                return ChunkPutResponse::AlreadyExists { address };
+                return ChunkPutResponse::AlreadyExists {
+                    request_id: rid,
+                    address,
+                };
             }
             Err(e) => {
-                return ChunkPutResponse::Error(ProtocolError::StorageFailed(e.to_string()));
+                return ChunkPutResponse::Error {
+                    request_id: rid,
+                    error: ProtocolError::StorageFailed(e.to_string()),
+                };
             }
             Ok(false) => {}
         }
 
-        // 4. Verify payment
+        // 3. Verify payment
         let payment_result = self
             .payment_verifier
             .verify_payment(&address, request.payment_proof.as_deref())
@@ -165,15 +175,19 @@ impl AntProtocol {
             }
             Ok(_) => {
                 return ChunkPutResponse::PaymentRequired {
+                    request_id: rid,
                     message: "Payment required for new chunk".to_string(),
                 };
             }
             Err(e) => {
-                return ChunkPutResponse::Error(ProtocolError::PaymentFailed(e.to_string()));
+                return ChunkPutResponse::Error {
+                    request_id: rid,
+                    error: ProtocolError::PaymentFailed(e.to_string()),
+                };
             }
         }
 
-        // 5. Store to disk
+        // 4. Store to disk
         match self.storage.put(&address, &request.content).await {
             Ok(_) => {
                 info!(
@@ -183,17 +197,24 @@ impl AntProtocol {
                 );
                 // Record the store in metrics
                 self.quote_generator.record_store(DATA_TYPE_CHUNK);
-                ChunkPutResponse::Success { address }
+                ChunkPutResponse::Success {
+                    request_id: rid,
+                    address,
+                }
             }
             Err(e) => {
                 warn!("Failed to store chunk {}: {}", hex::encode(address), e);
-                ChunkPutResponse::Error(ProtocolError::StorageFailed(e.to_string()))
+                ChunkPutResponse::Error {
+                    request_id: rid,
+                    error: ProtocolError::StorageFailed(e.to_string()),
+                }
             }
         }
     }
 
     /// Handle a GET request.
     async fn handle_get(&self, request: ChunkGetRequest) -> ChunkGetResponse {
+        let rid = request.request_id;
         let address = request.address;
         debug!("Handling GET request for {}", hex::encode(address));
 
@@ -204,21 +225,32 @@ impl AntProtocol {
                     hex::encode(address),
                     content.len()
                 );
-                ChunkGetResponse::Success { address, content }
+                ChunkGetResponse::Success {
+                    request_id: rid,
+                    address,
+                    content,
+                }
             }
             Ok(None) => {
                 debug!("Chunk {} not found", hex::encode(address));
-                ChunkGetResponse::NotFound { address }
+                ChunkGetResponse::NotFound {
+                    request_id: rid,
+                    address,
+                }
             }
             Err(e) => {
                 warn!("Failed to retrieve chunk {}: {}", hex::encode(address), e);
-                ChunkGetResponse::Error(ProtocolError::StorageFailed(e.to_string()))
+                ChunkGetResponse::Error {
+                    request_id: rid,
+                    error: ProtocolError::StorageFailed(e.to_string()),
+                }
             }
         }
     }
 
     /// Handle a quote request.
     fn handle_quote(&self, request: &ChunkQuoteRequest) -> ChunkQuoteResponse {
+        let rid = request.request_id;
         debug!(
             "Handling quote request for {} (size: {})",
             hex::encode(request.address),
@@ -228,10 +260,13 @@ impl AntProtocol {
         // Validate data size - data_size is u64, cast carefully
         let data_size_usize = usize::try_from(request.data_size).unwrap_or(usize::MAX);
         if data_size_usize > MAX_CHUNK_SIZE {
-            return ChunkQuoteResponse::Error(ProtocolError::ChunkTooLarge {
-                size: data_size_usize,
-                max_size: MAX_CHUNK_SIZE,
-            });
+            return ChunkQuoteResponse::Error {
+                request_id: rid,
+                error: ProtocolError::ChunkTooLarge {
+                    size: data_size_usize,
+                    max_size: MAX_CHUNK_SIZE,
+                },
+            };
         }
 
         match self
@@ -241,13 +276,22 @@ impl AntProtocol {
             Ok(quote) => {
                 // Serialize the quote
                 match rmp_serde::to_vec(&quote) {
-                    Ok(quote_bytes) => ChunkQuoteResponse::Success { quote: quote_bytes },
-                    Err(e) => ChunkQuoteResponse::Error(ProtocolError::QuoteFailed(format!(
-                        "Failed to serialize quote: {e}"
-                    ))),
+                    Ok(quote_bytes) => ChunkQuoteResponse::Success {
+                        request_id: rid,
+                        quote: quote_bytes,
+                    },
+                    Err(e) => ChunkQuoteResponse::Error {
+                        request_id: rid,
+                        error: ProtocolError::QuoteFailed(format!(
+                            "Failed to serialize quote: {e}"
+                        )),
+                    },
                 }
             }
-            Err(e) => ChunkQuoteResponse::Error(ProtocolError::QuoteFailed(e.to_string())),
+            Err(e) => ChunkQuoteResponse::Error {
+                request_id: rid,
+                error: ProtocolError::QuoteFailed(e.to_string()),
+            },
         }
     }
 
@@ -303,14 +347,13 @@ impl AntProtocol {
         let mut events = p2p.subscribe_events();
 
         tokio::spawn(async move {
-            while let Ok(event) = events.recv().await {
-                if let P2PEvent::Message {
-                    topic,
-                    source,
-                    data,
-                } = event
-                {
-                    if topic == CHUNK_PROTOCOL_ID {
+            loop {
+                match events.recv().await {
+                    Ok(P2PEvent::Message {
+                        topic,
+                        source,
+                        data,
+                    }) if topic == CHUNK_PROTOCOL_ID => {
                         debug!("Received chunk protocol message from {}", source);
                         let protocol = Arc::clone(&protocol);
                         let p2p = Arc::clone(&p2p);
@@ -332,6 +375,18 @@ impl AntProtocol {
                                 }
                             }
                         });
+                    }
+                    Ok(_) => {} // Different topic or event type
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(
+                            "Protocol routing task lagged, dropped {n} events — \
+                             consider increasing broadcast channel capacity"
+                        );
+                        // Continue processing; lagging is recoverable.
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        debug!("P2P event channel closed, stopping protocol routing");
+                        break;
                     }
                 }
             }
@@ -407,7 +462,8 @@ mod tests {
             .expect("handle put");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::PutResponse(ChunkPutResponse::Success { address: addr }) = response {
+        if let ChunkMessage::PutResponse(ChunkPutResponse::Success { address: addr, .. }) = response
+        {
             assert_eq!(addr, address);
         } else {
             panic!("expected PutResponse::Success, got: {response:?}");
@@ -428,6 +484,7 @@ mod tests {
         if let ChunkMessage::GetResponse(ChunkGetResponse::Success {
             address: addr,
             content: data,
+            ..
         }) = response
         {
             assert_eq!(addr, address);
@@ -452,7 +509,9 @@ mod tests {
             .expect("handle get");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::GetResponse(ChunkGetResponse::NotFound { address: addr }) = response {
+        if let ChunkMessage::GetResponse(ChunkGetResponse::NotFound { address: addr, .. }) =
+            response
+        {
             assert_eq!(addr, address);
         } else {
             panic!("expected GetResponse::NotFound");
@@ -485,9 +544,10 @@ mod tests {
 
         // Address verification is done by DiskStorage::put(), which returns a
         // StorageFailed error containing "Content address mismatch".
-        if let ChunkMessage::PutResponse(ChunkPutResponse::Error(ProtocolError::StorageFailed(
-            msg,
-        ))) = response
+        if let ChunkMessage::PutResponse(ChunkPutResponse::Error {
+            error: ProtocolError::StorageFailed(msg),
+            ..
+        }) = response
         {
             assert!(
                 msg.contains("address mismatch"),
@@ -516,9 +576,10 @@ mod tests {
             .expect("handle put");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::PutResponse(ChunkPutResponse::Error(ProtocolError::ChunkTooLarge {
+        if let ChunkMessage::PutResponse(ChunkPutResponse::Error {
+            error: ProtocolError::ChunkTooLarge { .. },
             ..
-        })) = response
+        }) = response
         {
             // Expected
         } else {
@@ -557,8 +618,9 @@ mod tests {
             .expect("handle put 2");
         let response = ChunkMessage::decode(&response_bytes).expect("decode response");
 
-        if let ChunkMessage::PutResponse(ChunkPutResponse::AlreadyExists { address: addr }) =
-            response
+        if let ChunkMessage::PutResponse(ChunkPutResponse::AlreadyExists {
+            address: addr, ..
+        }) = response
         {
             assert_eq!(addr, address);
         } else {

@@ -43,7 +43,9 @@ impl Default for DiskStorageConfig {
 /// Statistics about storage operations.
 #[derive(Debug, Clone, Default)]
 pub struct StorageStats {
-    /// Total number of chunks stored.
+    /// Current number of chunks on disk (incremented on put, decremented on delete).
+    pub current_chunks: u64,
+    /// Cumulative number of chunks written (never decremented).
     pub chunks_stored: u64,
     /// Total number of chunks retrieved.
     pub chunks_retrieved: u64,
@@ -131,7 +133,7 @@ impl DiskStorage {
                     .or_insert_with(|| Arc::new(Mutex::new(()))),
             )
         };
-        let _guard = lock.lock().await;
+        let guard = lock.lock().await;
 
         let chunk_path = self.chunk_path(address);
 
@@ -148,11 +150,11 @@ impl DiskStorage {
 
         // Enforce max_chunks capacity limit (0 = unlimited)
         if self.config.max_chunks > 0 {
-            let chunks_stored = self.stats.read().chunks_stored;
-            if chunks_stored >= self.config.max_chunks as u64 {
+            let current_chunks = self.stats.read().current_chunks;
+            if current_chunks >= self.config.max_chunks as u64 {
                 return Err(Error::Storage(format!(
-                    "Storage capacity reached: {} chunks stored, max is {}",
-                    chunks_stored, self.config.max_chunks
+                    "Storage capacity reached: {} chunks on disk, max is {}",
+                    current_chunks, self.config.max_chunks
                 )));
             }
         }
@@ -164,8 +166,10 @@ impl DiskStorage {
                 .map_err(|e| Error::Storage(format!("Failed to create shard directory: {e}")))?;
         }
 
-        // Atomic write: temp file + sync + rename
-        let temp_path = chunk_path.with_extension("tmp");
+        // Atomic write: temp file + sync + rename.
+        // Use a random suffix to avoid collisions if the per-address lock is
+        // ever bypassed (e.g., via put_local).
+        let temp_path = chunk_path.with_extension(format!("tmp.{:016x}", rand::random::<u64>()));
         let mut file = fs::File::create(&temp_path)
             .await
             .map_err(|e| Error::Storage(format!("Failed to create temp file: {e}")))?;
@@ -185,8 +189,24 @@ impl DiskStorage {
 
         {
             let mut stats = self.stats.write();
+            stats.current_chunks += 1;
             stats.chunks_stored += 1;
             stats.bytes_stored += content.len() as u64;
+        }
+
+        // Release and evict the per-address lock now that the file is on disk.
+        // The file itself acts as the durable guard: subsequent puts will see it
+        // exists before acquiring the lock.
+        drop(guard);
+        {
+            let mut locks = self.address_locks.lock().await;
+            // Only remove if we hold the last strong reference (no other put()
+            // call is waiting on this lock).
+            if let std::collections::hash_map::Entry::Occupied(entry) = locks.entry(*address) {
+                if Arc::strong_count(entry.get()) == 1 {
+                    entry.remove();
+                }
+            }
         }
 
         debug!(
@@ -291,6 +311,11 @@ impl DiskStorage {
         fs::remove_file(&chunk_path)
             .await
             .map_err(|e| Error::Storage(format!("Failed to delete chunk: {e}")))?;
+
+        {
+            let mut stats = self.stats.write();
+            stats.current_chunks = stats.current_chunks.saturating_sub(1);
+        }
 
         debug!("Deleted chunk {}", hex::encode(address));
 
@@ -449,6 +474,10 @@ mod tests {
         let result = storage.put(&addr3, content3).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("capacity reached"));
+
+        // After deleting one, the third should succeed
+        assert!(storage.delete(&addr1).await.is_ok());
+        assert!(storage.put(&addr3, content3).await.is_ok());
     }
 
     #[tokio::test]
