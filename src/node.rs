@@ -2,7 +2,9 @@
 
 use crate::ant_protocol::CHUNK_PROTOCOL_ID;
 use crate::attestation::VerificationLevel;
-use crate::config::{AttestationMode, AttestationNodeConfig, IpVersion, NetworkMode, NodeConfig};
+use crate::config::{
+    AttestationMode, AttestationNodeConfig, EvmNetworkConfig, IpVersion, NetworkMode, NodeConfig,
+};
 use crate::error::{Error, Result};
 use crate::event::{create_event_channel, NodeEvent, NodeEventsChannel, NodeEventsSender};
 use crate::payment::metrics::QuotingMetricsTracker;
@@ -11,6 +13,7 @@ use crate::payment::{PaymentVerifier, PaymentVerifierConfig, QuoteGenerator};
 use crate::storage::{AntProtocol, DiskStorage, DiskStorageConfig};
 use crate::upgrade::{AutoApplyUpgrader, UpgradeMonitor, UpgradeResult};
 use ant_evm::RewardsAddress;
+use evmlib::Network as EvmNetwork;
 use saorsa_core::{
     AttestationConfig as CoreAttestationConfig, BootstrapConfig as CoreBootstrapConfig,
     BootstrapManager, EnforcementMode as CoreEnforcementMode,
@@ -310,10 +313,14 @@ impl NodeBuilder {
             .map_err(|e| Error::Startup(format!("Failed to create disk storage: {e}")))?;
 
         // Create payment verifier
+        let evm_network = match config.payment.evm_network {
+            EvmNetworkConfig::ArbitrumOne => EvmNetwork::ArbitrumOne,
+            EvmNetworkConfig::ArbitrumSepolia => EvmNetwork::ArbitrumSepoliaTest,
+        };
         let payment_config = PaymentVerifierConfig {
             evm: crate::payment::EvmVerifierConfig {
                 enabled: config.payment.enabled,
-                ..Default::default()
+                network: evm_network,
             },
             cache_capacity: config.payment.cache_capacity,
         };
