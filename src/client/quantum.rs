@@ -16,19 +16,19 @@
 //! - **ML-DSA-65**: NIST FIPS 204 compliant signatures for authentication
 //! - **ChaCha20-Poly1305**: Symmetric encryption for data at rest
 
+use super::chunk_protocol::send_and_await_chunk_response;
 use super::data_types::{DataChunk, XorName};
 use crate::ant_protocol::{
     ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
-    ChunkPutResponse, CHUNK_PROTOCOL_ID,
+    ChunkPutResponse,
 };
 use crate::error::{Error, Result};
 use bytes::Bytes;
-use saorsa_core::{P2PEvent, P2PNode};
+use saorsa_core::P2PNode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Default timeout for network operations in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -128,9 +128,6 @@ impl QuantumClient {
 
         let target_peer = Self::pick_target_peer(node).await?;
 
-        // Subscribe before sending so we don't miss the response
-        let mut events = node.subscribe_events();
-
         // Create and send GET request
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let request = ChunkGetRequest::new(*address);
@@ -142,69 +139,45 @@ impl QuantumClient {
             .encode()
             .map_err(|e| Error::Network(format!("Failed to encode GET request: {e}")))?;
 
-        node.send_message(&target_peer, CHUNK_PROTOCOL_ID, message_bytes)
-            .await
-            .map_err(|e| {
-                Error::Network(format!("Failed to send GET to peer {target_peer}: {e}"))
-            })?;
-
-        // Wait for response matching our request_id from the target peer
         let timeout = Duration::from_secs(self.config.timeout_secs);
-        let deadline = Instant::now() + timeout;
+        let addr_hex = hex::encode(address);
+        let timeout_secs = self.config.timeout_secs;
 
-        while Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match tokio::time::timeout(remaining, events.recv()).await {
-                Ok(Ok(P2PEvent::Message {
-                    topic,
-                    source,
-                    data,
-                })) if topic == CHUNK_PROTOCOL_ID && source == target_peer => {
-                    let response = match ChunkMessage::decode(&data) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            warn!("Failed to decode chunk message, skipping: {e}");
-                            continue;
-                        }
-                    };
-                    if response.request_id != request_id {
-                        continue; // Not our response, keep waiting
-                    }
-                    match response.body {
-                        ChunkMessageBody::GetResponse(ChunkGetResponse::Success {
-                            address: addr,
-                            content,
-                        }) => {
-                            debug!(
-                                "Found chunk {} on saorsa network ({} bytes)",
-                                hex::encode(addr),
-                                content.len()
-                            );
-                            return Ok(Some(DataChunk::new(addr, Bytes::from(content))));
-                        }
-                        ChunkMessageBody::GetResponse(ChunkGetResponse::NotFound { .. }) => {
-                            debug!("Chunk {} not found on saorsa network", hex::encode(address));
-                            return Ok(None);
-                        }
-                        ChunkMessageBody::GetResponse(ChunkGetResponse::Error(e)) => {
-                            return Err(Error::Network(format!(
-                                "Remote GET error for {}: {e}",
-                                hex::encode(address)
-                            )));
-                        }
-                        _ => {} // Not a GET response, keep waiting
-                    }
+        send_and_await_chunk_response(
+            node,
+            &target_peer,
+            message_bytes,
+            request_id,
+            timeout,
+            |body| match body {
+                ChunkMessageBody::GetResponse(ChunkGetResponse::Success {
+                    address: addr,
+                    content,
+                }) => {
+                    debug!(
+                        "Found chunk {} on saorsa network ({} bytes)",
+                        hex::encode(addr),
+                        content.len()
+                    );
+                    Some(Ok(Some(DataChunk::new(addr, Bytes::from(content)))))
                 }
-                Ok(Ok(_)) => {} // Different topic/source, keep waiting
-                Ok(Err(_)) | Err(_) => break,
-            }
-        }
-
-        Err(Error::Network(format!(
-            "Timeout waiting for chunk {} after {}s",
-            hex::encode(address),
-            self.config.timeout_secs
-        )))
+                ChunkMessageBody::GetResponse(ChunkGetResponse::NotFound { .. }) => {
+                    debug!("Chunk {} not found on saorsa network", addr_hex);
+                    Some(Ok(None))
+                }
+                ChunkMessageBody::GetResponse(ChunkGetResponse::Error(e)) => Some(Err(
+                    Error::Network(format!("Remote GET error for {addr_hex}: {e}")),
+                )),
+                _ => None,
+            },
+            |e| Error::Network(format!("Failed to send GET to peer {target_peer}: {e}")),
+            || {
+                Error::Network(format!(
+                    "Timeout waiting for chunk {addr_hex} after {timeout_secs}s"
+                ))
+            },
+        )
+        .await
     }
 
     /// Store a chunk on the saorsa network via ANT protocol.
@@ -233,9 +206,6 @@ impl QuantumClient {
 
         let target_peer = Self::pick_target_peer(node).await?;
 
-        // Subscribe before sending so we don't miss the response
-        let mut events = node.subscribe_events();
-
         // Compute content address using SHA-256
         let address = crate::client::compute_address(&content);
 
@@ -255,76 +225,48 @@ impl QuantumClient {
             .encode()
             .map_err(|e| Error::Network(format!("Failed to encode PUT request: {e}")))?;
 
-        // Send to target peer
-        node.send_message(&target_peer, CHUNK_PROTOCOL_ID, message_bytes)
-            .await
-            .map_err(|e| {
-                Error::Network(format!("Failed to send PUT to peer {target_peer}: {e}"))
-            })?;
-
-        // Wait for response matching our request_id from the target peer
         let timeout = Duration::from_secs(self.config.timeout_secs);
-        let deadline = Instant::now() + timeout;
+        let content_len = content.len();
+        let addr_hex = hex::encode(address);
+        let timeout_secs = self.config.timeout_secs;
 
-        while Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match tokio::time::timeout(remaining, events.recv()).await {
-                Ok(Ok(P2PEvent::Message {
-                    topic,
-                    source,
-                    data,
-                })) if topic == CHUNK_PROTOCOL_ID && source == target_peer => {
-                    let response = match ChunkMessage::decode(&data) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            warn!("Failed to decode chunk message, skipping: {e}");
-                            continue;
-                        }
-                    };
-                    if response.request_id != request_id {
-                        continue; // Not our response, keep waiting
-                    }
-                    match response.body {
-                        ChunkMessageBody::PutResponse(ChunkPutResponse::Success {
-                            address: addr,
-                        }) => {
-                            info!(
-                                "Chunk stored at address: {} ({} bytes)",
-                                hex::encode(addr),
-                                content.len()
-                            );
-                            return Ok(addr);
-                        }
-                        ChunkMessageBody::PutResponse(ChunkPutResponse::AlreadyExists {
-                            address: addr,
-                        }) => {
-                            info!("Chunk already exists at address: {}", hex::encode(addr));
-                            return Ok(addr);
-                        }
-                        ChunkMessageBody::PutResponse(ChunkPutResponse::PaymentRequired {
-                            message,
-                        }) => {
-                            return Err(Error::Network(format!("Payment required: {message}")));
-                        }
-                        ChunkMessageBody::PutResponse(ChunkPutResponse::Error(e)) => {
-                            return Err(Error::Network(format!(
-                                "Remote PUT error for {}: {e}",
-                                hex::encode(address)
-                            )));
-                        }
-                        _ => {} // Not a PUT response, keep waiting
-                    }
+        send_and_await_chunk_response(
+            node,
+            &target_peer,
+            message_bytes,
+            request_id,
+            timeout,
+            |body| match body {
+                ChunkMessageBody::PutResponse(ChunkPutResponse::Success { address: addr }) => {
+                    info!(
+                        "Chunk stored at address: {} ({} bytes)",
+                        hex::encode(addr),
+                        content_len
+                    );
+                    Some(Ok(addr))
                 }
-                Ok(Ok(_)) => {} // Different topic/source, keep waiting
-                Ok(Err(_)) | Err(_) => break,
-            }
-        }
-
-        Err(Error::Network(format!(
-            "Timeout waiting for store response for {} after {}s",
-            hex::encode(address),
-            self.config.timeout_secs
-        )))
+                ChunkMessageBody::PutResponse(ChunkPutResponse::AlreadyExists {
+                    address: addr,
+                }) => {
+                    info!("Chunk already exists at address: {}", hex::encode(addr));
+                    Some(Ok(addr))
+                }
+                ChunkMessageBody::PutResponse(ChunkPutResponse::PaymentRequired { message }) => {
+                    Some(Err(Error::Network(format!("Payment required: {message}"))))
+                }
+                ChunkMessageBody::PutResponse(ChunkPutResponse::Error(e)) => Some(Err(
+                    Error::Network(format!("Remote PUT error for {addr_hex}: {e}")),
+                )),
+                _ => None,
+            },
+            |e| Error::Network(format!("Failed to send PUT to peer {target_peer}: {e}")),
+            || {
+                Error::Network(format!(
+                    "Timeout waiting for store response for {addr_hex} after {timeout_secs}s"
+                ))
+            },
+        )
+        .await
     }
 
     /// Check if a chunk exists on the saorsa network.

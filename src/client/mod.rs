@@ -53,8 +53,10 @@
 //! - **ML-DSA-65** (NIST FIPS 204): Digital signatures for authentication
 //! - **ChaCha20-Poly1305**: Symmetric encryption for data at rest
 
+mod chunk_protocol;
 mod data_types;
 mod quantum;
 
+pub use chunk_protocol::send_and_await_chunk_response;
 pub use data_types::{compute_address, ChunkStats, DataChunk, XorName};
 pub use quantum::{QuantumClient, QuantumConfig};
