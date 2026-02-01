@@ -127,6 +127,17 @@ impl DiskStorage {
             return Ok(false);
         }
 
+        // Enforce max_chunks capacity limit (0 = unlimited)
+        if self.config.max_chunks > 0 {
+            let chunks_stored = self.stats.read().chunks_stored;
+            if chunks_stored >= self.config.max_chunks as u64 {
+                return Err(Error::Storage(format!(
+                    "Storage capacity reached: {} chunks stored, max is {}",
+                    chunks_stored, self.config.max_chunks
+                )));
+            }
+        }
+
         // Ensure parent directories exist
         if let Some(parent) = chunk_path.parent() {
             fs::create_dir_all(parent)
@@ -385,6 +396,33 @@ mod tests {
         // Delete again (already deleted)
         let deleted2 = storage.delete(&address).await.expect("delete 2");
         assert!(!deleted2);
+    }
+
+    #[tokio::test]
+    async fn test_max_chunks_enforced() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let config = DiskStorageConfig {
+            root_dir: temp_dir.path().to_path_buf(),
+            verify_on_read: true,
+            max_chunks: 2,
+        };
+        let storage = DiskStorage::new(config).await.expect("create storage");
+
+        let content1 = b"chunk one";
+        let content2 = b"chunk two";
+        let content3 = b"chunk three";
+        let addr1 = DiskStorage::compute_address(content1);
+        let addr2 = DiskStorage::compute_address(content2);
+        let addr3 = DiskStorage::compute_address(content3);
+
+        // First two should succeed
+        assert!(storage.put(&addr1, content1).await.is_ok());
+        assert!(storage.put(&addr2, content2).await.is_ok());
+
+        // Third should be rejected
+        let result = storage.put(&addr3, content3).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("capacity reached"));
     }
 
     #[tokio::test]
