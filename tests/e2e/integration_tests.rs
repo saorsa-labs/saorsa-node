@@ -9,7 +9,10 @@ use super::testnet::{
     SMALL_NODE_COUNT, TEST_PORT_RANGE_MAX, TEST_PORT_RANGE_MIN,
 };
 use super::{NetworkState, TestHarness, TestNetwork, TestNetworkConfig};
+use bytes::Bytes;
 use saorsa_core::P2PEvent;
+use saorsa_node::client::{QuantumClient, QuantumConfig};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Test that a minimal network (5 nodes) can form and stabilize.
@@ -268,6 +271,104 @@ async fn test_node_to_node_messaging() {
     // can prevent background tasks from terminating during shutdown.
     drop(all_rx);
     drop(all_nodes);
+
+    harness
+        .teardown()
+        .await
+        .expect("Failed to teardown test harness");
+}
+
+/// Test that `QuantumClient` can store and retrieve chunks through the ANT
+/// protocol on a live testnet.
+///
+/// This validates the full client→P2P→protocol handler→disk storage round-trip:
+/// 1. Spin up a minimal 5-node testnet
+/// 2. Create a `QuantumClient` connected to a regular node
+/// 3. Store a chunk via `put_chunk()` (sends `ChunkPutRequest` over P2P)
+/// 4. Retrieve it via `get_chunk()` (sends `ChunkGetRequest` over P2P)
+/// 5. Verify existence via `exists()`
+/// 6. Confirm a missing chunk returns `None` / `false`
+#[tokio::test(flavor = "multi_thread")]
+async fn test_quantum_client_chunk_round_trip() {
+    /// Timeout tuned for local testnet; the default 30s is generous but
+    /// avoids flakes in CI where node startup is slow.
+    const CLIENT_TIMEOUT_SECS: u64 = 30;
+
+    let harness = TestHarness::setup_minimal()
+        .await
+        .expect("Failed to setup test harness");
+
+    // Pick a regular node (node 3) and wire a QuantumClient to it
+    let node = harness.node(3).expect("Node 3 should exist");
+
+    let config = QuantumConfig {
+        timeout_secs: CLIENT_TIMEOUT_SECS,
+        ..Default::default()
+    };
+    let client = QuantumClient::new(config).with_node(Arc::clone(&node));
+
+    // ── PUT ──────────────────────────────────────────────────────────────
+    let content = Bytes::from("quantum client e2e test payload");
+    let address = client
+        .put_chunk(content.clone())
+        .await
+        .expect("QuantumClient::put_chunk should succeed");
+
+    // Address must equal SHA256(content)
+    let expected_address = saorsa_node::compute_address(&content);
+    assert_eq!(
+        address, expected_address,
+        "put_chunk should return the content-addressed hash"
+    );
+
+    // ── GET ──────────────────────────────────────────────────────────────
+    let retrieved = client
+        .get_chunk(&address)
+        .await
+        .expect("QuantumClient::get_chunk should succeed");
+
+    let chunk = retrieved.expect("Chunk should be found after storing it");
+    assert_eq!(
+        chunk.content.as_ref(),
+        content.as_ref(),
+        "Retrieved content should match what was stored"
+    );
+    assert_eq!(
+        chunk.address, address,
+        "Retrieved address should match the stored address"
+    );
+
+    // ── EXISTS ───────────────────────────────────────────────────────────
+    let found = client
+        .exists(&address)
+        .await
+        .expect("QuantumClient::exists should succeed");
+    assert!(found, "exists() should return true for a stored chunk");
+
+    // ── GET missing ──────────────────────────────────────────────────────
+    let missing_address = [0xDE; 32];
+    let missing = client
+        .get_chunk(&missing_address)
+        .await
+        .expect("get_chunk for missing address should not error");
+    assert!(
+        missing.is_none(),
+        "get_chunk should return None for a non-existent chunk"
+    );
+
+    // ── EXISTS missing ───────────────────────────────────────────────────
+    let missing_exists = client
+        .exists(&missing_address)
+        .await
+        .expect("exists for missing address should not error");
+    assert!(
+        !missing_exists,
+        "exists() should return false for a non-existent chunk"
+    );
+
+    // Drop the client (and its event subscriptions) before teardown
+    drop(client);
+    drop(node);
 
     harness
         .teardown()
