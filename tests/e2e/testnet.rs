@@ -19,7 +19,7 @@ use rand::Rng;
 use saorsa_core::{NodeConfig as CoreNodeConfig, P2PEvent, P2PNode};
 use saorsa_node::ant_protocol::{
     ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkPutRequest, ChunkPutResponse,
-    CHUNK_PROTOCOL_ID,
+    CHUNK_PROTOCOL_ID, MAX_CHUNK_SIZE,
 };
 use saorsa_node::client::{DataChunk, XorName};
 use saorsa_node::payment::{
@@ -379,7 +379,7 @@ impl TestNode {
             .ok_or(TestnetError::NodeNotRunning)?;
 
         // Compute content address
-        let address = Self::compute_chunk_address(data);
+        let address = saorsa_node::compute_address(data);
 
         // Create PUT request with empty payment proof (EVM disabled in tests)
         let empty_payment = rmp_serde::to_vec(&ant_evm::ProofOfPayment {
@@ -514,6 +514,13 @@ impl TestNode {
     /// Returns an error if this node is not running, the message cannot be
     /// sent, the response times out, or the remote peer reports an error.
     pub async fn store_chunk_on_peer(&self, target_peer_id: &str, data: &[u8]) -> Result<XorName> {
+        if data.len() > MAX_CHUNK_SIZE {
+            return Err(TestnetError::Storage(format!(
+                "Chunk size {} exceeds maximum {MAX_CHUNK_SIZE}",
+                data.len(),
+            )));
+        }
+
         let p2p = self.p2p_node.as_ref().ok_or(TestnetError::NodeNotRunning)?;
         let target_peer_id = target_peer_id.to_string();
 
@@ -521,7 +528,7 @@ impl TestNode {
         let mut events = p2p.subscribe_events();
 
         // Create PUT request
-        let address = Self::compute_chunk_address(data);
+        let address = saorsa_node::compute_address(data);
         let empty_payment = rmp_serde::to_vec(&ant_evm::ProofOfPayment {
             peer_quotes: vec![],
         })
@@ -721,11 +728,6 @@ impl TestNode {
         )))
     }
 
-    /// Compute content address for chunk data (SHA256 hash).
-    #[must_use]
-    pub fn compute_chunk_address(data: &[u8]) -> XorName {
-        saorsa_node::compute_address(data)
-    }
 }
 
 /// Manages a network of test nodes.

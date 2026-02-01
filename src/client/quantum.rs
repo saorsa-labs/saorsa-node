@@ -33,16 +33,11 @@ use tracing::{debug, info, trace};
 /// Default timeout for network operations in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
-/// Default number of replicas for data redundancy.
-const DEFAULT_REPLICA_COUNT: u8 = 4;
-
 /// Configuration for the quantum-resistant client.
 #[derive(Debug, Clone)]
 pub struct QuantumConfig {
     /// Timeout for network operations in seconds.
     pub timeout_secs: u64,
-    /// Number of replicas for data redundancy.
-    pub replica_count: u8,
     /// Enable encryption for all stored data.
     pub encrypt_data: bool,
 }
@@ -51,7 +46,6 @@ impl Default for QuantumConfig {
     fn default() -> Self {
         Self {
             timeout_secs: DEFAULT_TIMEOUT_SECS,
-            replica_count: DEFAULT_REPLICA_COUNT,
             encrypt_data: true,
         }
     }
@@ -390,7 +384,6 @@ mod tests {
     fn test_quantum_config_default() {
         let config = QuantumConfig::default();
         assert_eq!(config.timeout_secs, DEFAULT_TIMEOUT_SECS);
-        assert_eq!(config.replica_count, DEFAULT_REPLICA_COUNT);
         assert!(config.encrypt_data);
     }
 
