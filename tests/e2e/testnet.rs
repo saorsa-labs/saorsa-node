@@ -570,7 +570,7 @@ impl TestNode {
                 TestnetError::Storage(format!("Failed to send PUT to remote node: {e}"))
             })?;
 
-        // Wait for response matching our request_id
+        // Wait for response matching our request_id from the target peer
         let timeout = Duration::from_secs(DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS);
         let deadline = Instant::now() + timeout;
 
@@ -579,9 +579,9 @@ impl TestNode {
             match tokio::time::timeout(remaining, events.recv()).await {
                 Ok(Ok(P2PEvent::Message {
                     topic,
+                    source,
                     data: resp_data,
-                    ..
-                })) if topic == CHUNK_PROTOCOL_ID => {
+                })) if topic == CHUNK_PROTOCOL_ID && source == target_peer_id => {
                     let response = match ChunkMessage::decode(&resp_data) {
                         Ok(r) => r,
                         Err(e) => {
@@ -630,7 +630,7 @@ impl TestNode {
                         _ => {} // Not a PUT response, keep waiting
                     }
                 }
-                Ok(Ok(_)) => {} // Different topic, keep waiting
+                Ok(Ok(_)) => {} // Different topic/source, keep waiting
                 Ok(Err(_)) | Err(_) => break,
             }
         }
@@ -699,7 +699,7 @@ impl TestNode {
                 TestnetError::Retrieval(format!("Failed to send GET to remote node: {e}"))
             })?;
 
-        // Wait for response matching our request_id
+        // Wait for response matching our request_id from the target peer
         let timeout = Duration::from_secs(DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS);
         let deadline = Instant::now() + timeout;
 
@@ -708,9 +708,9 @@ impl TestNode {
             match tokio::time::timeout(remaining, events.recv()).await {
                 Ok(Ok(P2PEvent::Message {
                     topic,
+                    source,
                     data: resp_data,
-                    ..
-                })) if topic == CHUNK_PROTOCOL_ID => {
+                })) if topic == CHUNK_PROTOCOL_ID && source == target_peer_id => {
                     let response = match ChunkMessage::decode(&resp_data) {
                         Ok(r) => r,
                         Err(e) => {
@@ -754,7 +754,7 @@ impl TestNode {
                         _ => {} // Not a GET response, keep waiting
                     }
                 }
-                Ok(Ok(_)) => {} // Different topic, keep waiting
+                Ok(Ok(_)) => {} // Different topic/source, keep waiting
                 Ok(Err(_)) | Err(_) => break,
             }
         }
