@@ -13,6 +13,10 @@ use sha2::{Digest, Sha256};
 pub const CHUNK_PROTOCOL_ID: &str = "saorsa/ant/chunk/v1";
 
 /// Current protocol version.
+///
+/// This must stay in sync with the version suffix in [`CHUNK_PROTOCOL_ID`].
+/// Future version negotiation will include this in the wire header; for now
+/// it is used for documentation and assertions only.
 pub const PROTOCOL_VERSION: u16 = 1;
 
 /// Maximum chunk size in bytes (4MB).

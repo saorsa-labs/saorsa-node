@@ -108,12 +108,15 @@ impl AntProtocol {
             ChunkMessage::QuoteRequest(ref req) => {
                 ChunkMessage::QuoteResponse(self.handle_quote(req))
             }
-            // Response messages shouldn't be received as requests
-            ChunkMessage::PutResponse(_)
+            // Response messages shouldn't be received as requests — this
+            // indicates a peer routing bug or protocol mismatch.
+            other @ (ChunkMessage::PutResponse(_)
             | ChunkMessage::GetResponse(_)
-            | ChunkMessage::QuoteResponse(_) => {
-                let error = ProtocolError::Internal("Unexpected response message".to_string());
-                ChunkMessage::PutResponse(ChunkPutResponse::Error(error))
+            | ChunkMessage::QuoteResponse(_)) => {
+                warn!("Received unexpected response message as request: {other:?}");
+                return Err(crate::error::Error::Protocol(
+                    "Received response message as request".to_string(),
+                ));
             }
         };
 

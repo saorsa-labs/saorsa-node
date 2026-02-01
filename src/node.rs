@@ -327,9 +327,14 @@ impl NodeBuilder {
         let payment_verifier = PaymentVerifier::new(payment_config);
 
         // Create quote generator
-        let rewards_address = match config.payment.rewards_address {
-            Some(ref addr) => parse_rewards_address(addr)?,
-            None => RewardsAddress::new(DEFAULT_REWARDS_ADDRESS),
+        let rewards_address = if let Some(ref addr) = config.payment.rewards_address {
+            parse_rewards_address(addr)?
+        } else {
+            warn!(
+                "No rewards address configured — using zero address. \
+                     Payments will be unrecoverable. Set `payment.rewards_address` in config."
+            );
+            RewardsAddress::new(DEFAULT_REWARDS_ADDRESS)
         };
         let metrics_tracker = QuotingMetricsTracker::new(DEFAULT_MAX_QUOTING_RECORDS, 0);
         let quote_generator = QuoteGenerator::new(rewards_address, metrics_tracker);

@@ -28,7 +28,7 @@ use saorsa_core::{P2PEvent, P2PNode};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 /// Default timeout for network operations in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -179,7 +179,9 @@ impl QuantumClient {
                                 hex::encode(address)
                             )));
                         }
-                        _ => {} // Not a GET response, keep waiting
+                        other => {
+                            trace!("Discarding non-GET-response while waiting: {other:?}");
+                        }
                     }
                 }
                 Ok(Ok(_)) => {} // Different topic/source, keep waiting
@@ -286,7 +288,9 @@ impl QuantumClient {
                                 hex::encode(address)
                             )));
                         }
-                        _ => {} // Not a PUT response, keep waiting
+                        other => {
+                            trace!("Discarding non-PUT-response while waiting: {other:?}");
+                        }
                     }
                 }
                 Ok(Ok(_)) => {} // Different topic/source, keep waiting
