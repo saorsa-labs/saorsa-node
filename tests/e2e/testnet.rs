@@ -507,24 +507,6 @@ impl TestNode {
     // Remote Chunk Operations (via P2P network)
     // =========================================================================
 
-    /// Store a chunk on a remote node via P2P.
-    ///
-    /// Sends a `ChunkPutRequest` to the target node over the P2P network
-    /// and waits for the `ChunkPutResponse`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if either node is not running, the message cannot be
-    /// sent, the response times out, or the remote node reports an error.
-    pub async fn store_chunk_on(&self, target: &Self, data: &[u8]) -> Result<XorName> {
-        let target_p2p = target
-            .p2p_node
-            .as_ref()
-            .ok_or(TestnetError::NodeNotRunning)?;
-        let target_peer_id = target_p2p.peer_id().clone();
-        self.store_chunk_on_peer(&target_peer_id, data).await
-    }
-
     /// Store a chunk on a remote peer via P2P using the peer's ID directly.
     ///
     /// # Errors
