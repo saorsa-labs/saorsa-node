@@ -44,6 +44,14 @@ pub enum Error {
     #[error("serialization error: {0}")]
     Serialization(String),
 
+    /// Protocol error.
+    #[error("protocol error: {0}")]
+    Protocol(String),
+
+    /// Invalid chunk error.
+    #[error("invalid chunk: {0}")]
+    InvalidChunk(String),
+
     /// Node is shutting down.
     #[error("node is shutting down")]
     ShuttingDown,

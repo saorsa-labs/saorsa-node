@@ -9,6 +9,10 @@ use super::testnet::{
     SMALL_NODE_COUNT, TEST_PORT_RANGE_MAX, TEST_PORT_RANGE_MIN,
 };
 use super::{NetworkState, TestHarness, TestNetwork, TestNetworkConfig};
+use bytes::Bytes;
+use saorsa_core::P2PEvent;
+use saorsa_node::client::{QuantumClient, QuantumConfig};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Test that a minimal network (5 nodes) can form and stabilize.
@@ -183,4 +187,191 @@ fn test_config_presets() {
     // Each config should have a unique data directory
     assert_ne!(default.test_data_dir, minimal.test_data_dir);
     assert_ne!(minimal.test_data_dir, small.test_data_dir);
+}
+
+/// Test that a node can send a message to a connected peer and the peer
+/// receives it.
+///
+/// This validates the fundamental `send_message` / `subscribe_events` layer
+/// that all higher-level protocols (chunk, etc.) are built on.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_node_to_node_messaging() {
+    const TEST_TOPIC: &str = "test/ping/v1";
+    const PAYLOAD: &[u8] = b"hello from node 3";
+    // With the reduced transport recv timeout (2s), messages should arrive
+    // within a few seconds. 10s gives ample headroom.
+    const DELIVERY_TIMEOUT_SECS: u64 = 10;
+
+    let harness = TestHarness::setup_minimal()
+        .await
+        .expect("Failed to setup test harness");
+
+    // Subscribe on every node's event stream *before* sending, so we can
+    // confirm exactly which node receives the message.
+    let all_nodes = harness.all_nodes();
+    let mut all_rx: Vec<_> = all_nodes.iter().map(|n| n.subscribe_events()).collect();
+
+    // Pick node 3 (regular) and send to one of its connected peers.
+    let sender = harness.test_node(3).expect("Node 3 should exist");
+    let peers = sender.connected_peers().await;
+    assert!(
+        !peers.is_empty(),
+        "Node 3 should have at least one connected peer"
+    );
+    let target_peer_id = peers[0].clone();
+
+    let sender_p2p = sender.p2p_node.as_ref().expect("Node 3 should be running");
+
+    sender_p2p
+        .send_message(&target_peer_id, TEST_TOPIC, PAYLOAD.to_vec())
+        .await
+        .expect("Failed to send message to connected peer");
+
+    // Poll all event streams until the message arrives or we time out.
+    // Note: P2PEvent::Message.source is a transport-level peer ID (hex),
+    // which differs from P2PNode::peer_id() (app-level "peer_…" format),
+    // so we match on topic + payload instead of source identity.
+    let mut received = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(DELIVERY_TIMEOUT_SECS);
+
+    // Race all receivers concurrently instead of polling sequentially.
+    // Pin the deadline sleep once so it tracks cumulative time across loop
+    // iterations — otherwise select_all always wins the race against a
+    // freshly-created sleep and the timeout never fires.
+    let timeout = tokio::time::sleep_until(deadline);
+    tokio::pin!(timeout);
+
+    while !received {
+        let futs: Vec<_> = all_rx
+            .iter_mut()
+            .enumerate()
+            .map(|(i, rx)| Box::pin(async move { (i, rx.recv().await) }))
+            .collect();
+
+        tokio::select! {
+            (result, idx, _remaining) = futures::future::select_all(futs) => {
+                if let (_, Ok(P2PEvent::Message { ref topic, ref data, .. })) = (idx, &result.1) {
+                    if topic == TEST_TOPIC && data.as_slice() == PAYLOAD {
+                        received = true;
+                    }
+                }
+            }
+            () = &mut timeout => {
+                break;
+            }
+        }
+    }
+
+    assert!(
+        received,
+        "No node received the message on topic '{TEST_TOPIC}'"
+    );
+
+    // Drop event subscribers before teardown — holding broadcast receivers
+    // can prevent background tasks from terminating during shutdown.
+    drop(all_rx);
+    drop(all_nodes);
+
+    harness
+        .teardown()
+        .await
+        .expect("Failed to teardown test harness");
+}
+
+/// Test that `QuantumClient` can store and retrieve chunks through the ANT
+/// protocol on a live testnet.
+///
+/// This validates the full client→P2P→protocol handler→disk storage round-trip:
+/// 1. Spin up a minimal 5-node testnet
+/// 2. Create a `QuantumClient` connected to a regular node
+/// 3. Store a chunk via `put_chunk()` (sends `ChunkPutRequest` over P2P)
+/// 4. Retrieve it via `get_chunk()` (sends `ChunkGetRequest` over P2P)
+/// 5. Verify existence via `exists()`
+/// 6. Confirm a missing chunk returns `None` / `false`
+#[tokio::test(flavor = "multi_thread")]
+async fn test_quantum_client_chunk_round_trip() {
+    /// Timeout tuned for local testnet; the default 30s is generous but
+    /// avoids flakes in CI where node startup is slow.
+    const CLIENT_TIMEOUT_SECS: u64 = 30;
+
+    let harness = TestHarness::setup_minimal()
+        .await
+        .expect("Failed to setup test harness");
+
+    // Pick a regular node (node 3) and wire a QuantumClient to it
+    let node = harness.node(3).expect("Node 3 should exist");
+
+    let config = QuantumConfig {
+        timeout_secs: CLIENT_TIMEOUT_SECS,
+        ..Default::default()
+    };
+    let client = QuantumClient::new(config).with_node(Arc::clone(&node));
+
+    // ── PUT ──────────────────────────────────────────────────────────────
+    let content = Bytes::from("quantum client e2e test payload");
+    let address = client
+        .put_chunk(content.clone())
+        .await
+        .expect("QuantumClient::put_chunk should succeed");
+
+    // Address must equal SHA256(content)
+    let expected_address = saorsa_node::compute_address(&content);
+    assert_eq!(
+        address, expected_address,
+        "put_chunk should return the content-addressed hash"
+    );
+
+    // ── GET ──────────────────────────────────────────────────────────────
+    let retrieved = client
+        .get_chunk(&address)
+        .await
+        .expect("QuantumClient::get_chunk should succeed");
+
+    let chunk = retrieved.expect("Chunk should be found after storing it");
+    assert_eq!(
+        chunk.content.as_ref(),
+        content.as_ref(),
+        "Retrieved content should match what was stored"
+    );
+    assert_eq!(
+        chunk.address, address,
+        "Retrieved address should match the stored address"
+    );
+
+    // ── EXISTS ───────────────────────────────────────────────────────────
+    let found = client
+        .exists(&address)
+        .await
+        .expect("QuantumClient::exists should succeed");
+    assert!(found, "exists() should return true for a stored chunk");
+
+    // ── GET missing ──────────────────────────────────────────────────────
+    let missing_address = [0xDE; 32];
+    let missing = client
+        .get_chunk(&missing_address)
+        .await
+        .expect("get_chunk for missing address should not error");
+    assert!(
+        missing.is_none(),
+        "get_chunk should return None for a non-existent chunk"
+    );
+
+    // ── EXISTS missing ───────────────────────────────────────────────────
+    let missing_exists = client
+        .exists(&missing_address)
+        .await
+        .expect("exists for missing address should not error");
+    assert!(
+        !missing_exists,
+        "exists() should return false for a non-existent chunk"
+    );
+
+    // Drop the client (and its event subscriptions) before teardown
+    drop(client);
+    drop(node);
+
+    harness
+        .teardown()
+        .await
+        .expect("Failed to teardown test harness");
 }

@@ -2,12 +2,31 @@
 //!
 //! This module provides the core infrastructure for creating a local testnet
 //! of 25 saorsa nodes for E2E testing.
+//!
+//! ## Protocol-Based Testing
+//!
+//! Each test node includes a `AntProtocol` handler that processes chunk
+//! PUT/GET requests using the autonomi protocol messages. This allows E2E
+//! tests to validate the complete protocol flow including:
+//! - Message encoding/decoding (bincode serialization)
+//! - Content address verification
+//! - Payment verification (when enabled)
+//! - Disk storage persistence
 
+use ant_evm::RewardsAddress;
 use bytes::Bytes;
 use rand::Rng;
-use saorsa_core::{NodeConfig as CoreNodeConfig, P2PNode};
-use saorsa_node::client::{DataChunk, XorName};
-use sha2::{Digest, Sha256};
+use saorsa_core::{NodeConfig as CoreNodeConfig, P2PEvent, P2PNode};
+use saorsa_node::ant_protocol::{
+    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
+    ChunkPutResponse, CHUNK_PROTOCOL_ID,
+};
+use saorsa_node::client::{send_and_await_chunk_response, DataChunk, XorName};
+use saorsa_node::payment::{
+    EvmVerifierConfig, PaymentVerifier, PaymentVerifierConfig, QuoteGenerator,
+    QuotingMetricsTracker,
+};
+use saorsa_node::storage::{AntProtocol, DiskStorage, DiskStorageConfig};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,6 +82,22 @@ const SMALL_STABILIZATION_TIMEOUT_SECS: u64 = 60;
 
 /// Default timeout for chunk operations (seconds).
 const DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS: u64 = 30;
+
+// =============================================================================
+// AntProtocol Test Configuration
+// =============================================================================
+
+/// Payment cache capacity for test nodes.
+const TEST_PAYMENT_CACHE_CAPACITY: usize = 1000;
+
+/// Test rewards address (20 bytes, all 0x01).
+const TEST_REWARDS_ADDRESS: [u8; 20] = [0x01; 20];
+
+/// Max records for quoting metrics (test value).
+const TEST_MAX_RECORDS: usize = 100_000;
+
+/// Initial records for quoting metrics (test value).
+const TEST_INITIAL_RECORDS: usize = 1000;
 
 // =============================================================================
 // Default Node Counts
@@ -279,6 +314,9 @@ pub struct TestNode {
     /// Reference to the running P2P node.
     pub p2p_node: Option<Arc<P2PNode>>,
 
+    /// ANT protocol handler for processing chunk PUT/GET requests.
+    pub ant_protocol: Option<Arc<AntProtocol>>,
+
     /// Is this a bootstrap node?
     pub is_bootstrap: bool,
 
@@ -287,6 +325,9 @@ pub struct TestNode {
 
     /// Bootstrap addresses this node connects to.
     pub bootstrap_addrs: Vec<SocketAddr>,
+
+    /// Protocol handler background task.
+    protocol_task: Option<JoinHandle<()>>,
 }
 
 impl TestNode {
@@ -307,91 +348,368 @@ impl TestNode {
         }
     }
 
+    /// Get the list of connected peer IDs.
+    pub async fn connected_peers(&self) -> Vec<String> {
+        if let Some(ref node) = self.p2p_node {
+            node.connected_peers().await
+        } else {
+            vec![]
+        }
+    }
+
     // =========================================================================
-    // Chunk Operations (immutable, content-addressed)
+    // Chunk Operations (via autonomi protocol messages)
     // =========================================================================
 
-    /// Store a chunk on the network.
+    /// Store a chunk using the autonomi protocol.
+    ///
+    /// Creates a `ChunkPutRequest` message, sends it to the local `AntProtocol`
+    /// handler, and parses the `ChunkPutResponse`.
     ///
     /// Returns the content-addressed `XorName` where the chunk is stored.
     ///
     /// # Errors
     ///
     /// Returns an error if the node is not running, chunk exceeds max size,
-    /// storage fails, or operation times out.
+    /// protocol handling fails, or the response indicates an error.
     pub async fn store_chunk(&self, data: &[u8]) -> Result<XorName> {
-        // Validate chunk size (max 4MB)
-        const MAX_CHUNK_SIZE: usize = 4 * 1024 * 1024;
-        if data.len() > MAX_CHUNK_SIZE {
-            return Err(TestnetError::Storage(format!(
-                "Chunk size {} exceeds maximum {} bytes",
-                data.len(),
-                MAX_CHUNK_SIZE
-            )));
-        }
+        let protocol = self
+            .ant_protocol
+            .as_ref()
+            .ok_or(TestnetError::NodeNotRunning)?;
 
-        let node = self.p2p_node.as_ref().ok_or(TestnetError::NodeNotRunning)?;
-
-        // Compute content address (SHA256 hash)
+        // Compute content address
         let address = Self::compute_chunk_address(data);
 
-        // Store in DHT with timeout
+        // Create PUT request with empty payment proof (EVM disabled in tests)
+        let empty_payment = rmp_serde::to_vec(&ant_evm::ProofOfPayment {
+            peer_quotes: vec![],
+        })
+        .map_err(|e| {
+            TestnetError::Serialization(format!("Failed to serialize payment proof: {e}"))
+        })?;
+
+        let request_id: u64 = rand::thread_rng().gen();
+        let request = ChunkPutRequest::with_payment(address, data.to_vec(), empty_payment);
+        let message = ChunkMessage {
+            request_id,
+            body: ChunkMessageBody::PutRequest(request),
+        };
+        let message_bytes = message.encode().map_err(|e| {
+            TestnetError::Serialization(format!("Failed to encode PUT request: {e}"))
+        })?;
+
+        // Handle the protocol message
         let timeout = Duration::from_secs(DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS);
-        tokio::time::timeout(timeout, node.dht_put(address, data.to_vec()))
+        let response_bytes = tokio::time::timeout(timeout, protocol.handle_message(&message_bytes))
             .await
             .map_err(|_| {
                 TestnetError::Storage(format!(
                     "Timeout storing chunk after {DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS}s"
                 ))
             })?
-            .map_err(|e| TestnetError::Storage(format!("Failed to store chunk: {e}")))?;
+            .map_err(|e| TestnetError::Storage(format!("Protocol error: {e}")))?;
 
-        debug!(
-            "Node {} stored chunk at {}",
-            self.index,
-            hex::encode(address)
-        );
-        Ok(address)
+        // Parse response
+        let response = ChunkMessage::decode(&response_bytes)
+            .map_err(|e| TestnetError::Storage(format!("Failed to decode response: {e}")))?;
+
+        match response.body {
+            ChunkMessageBody::PutResponse(ChunkPutResponse::Success { address: addr }) => {
+                debug!("Node {} stored chunk at {}", self.index, hex::encode(addr));
+                Ok(addr)
+            }
+            ChunkMessageBody::PutResponse(ChunkPutResponse::AlreadyExists { address: addr }) => {
+                debug!(
+                    "Node {} chunk already exists at {}",
+                    self.index,
+                    hex::encode(addr)
+                );
+                Ok(addr)
+            }
+            ChunkMessageBody::PutResponse(ChunkPutResponse::PaymentRequired { message }) => Err(
+                TestnetError::Storage(format!("Payment required: {message}")),
+            ),
+            ChunkMessageBody::PutResponse(ChunkPutResponse::Error(e)) => {
+                Err(TestnetError::Storage(format!("Protocol error: {e}")))
+            }
+            _ => Err(TestnetError::Storage(
+                "Unexpected response type".to_string(),
+            )),
+        }
     }
 
-    /// Retrieve a chunk from the network.
+    /// Retrieve a chunk using the autonomi protocol.
+    ///
+    /// Creates a `ChunkGetRequest` message, sends it to the local `AntProtocol`
+    /// handler, and parses the `ChunkGetResponse`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the node is not running, retrieval fails, or operation times out.
+    /// Returns an error if the node is not running, protocol handling fails,
+    /// or the response indicates an error.
     pub async fn get_chunk(&self, address: &XorName) -> Result<Option<DataChunk>> {
-        let node = self.p2p_node.as_ref().ok_or(TestnetError::NodeNotRunning)?;
+        let protocol = self
+            .ant_protocol
+            .as_ref()
+            .ok_or(TestnetError::NodeNotRunning)?;
 
+        // Create GET request
+        let request_id: u64 = rand::thread_rng().gen();
+        let request = ChunkGetRequest::new(*address);
+        let message = ChunkMessage {
+            request_id,
+            body: ChunkMessageBody::GetRequest(request),
+        };
+        let message_bytes = message.encode().map_err(|e| {
+            TestnetError::Serialization(format!("Failed to encode GET request: {e}"))
+        })?;
+
+        // Handle the protocol message
         let timeout = Duration::from_secs(DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS);
-        let result = tokio::time::timeout(timeout, node.dht_get(*address))
+        let response_bytes = tokio::time::timeout(timeout, protocol.handle_message(&message_bytes))
             .await
             .map_err(|_| {
                 TestnetError::Retrieval(format!(
                     "Timeout retrieving chunk after {DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS}s"
                 ))
-            })?;
+            })?
+            .map_err(|e| TestnetError::Retrieval(format!("Protocol error: {e}")))?;
 
-        match result {
-            Ok(Some(data)) => {
-                let chunk = DataChunk::new(*address, Bytes::from(data));
-                Ok(Some(chunk))
+        // Parse response
+        let response = ChunkMessage::decode(&response_bytes)
+            .map_err(|e| TestnetError::Retrieval(format!("Failed to decode response: {e}")))?;
+
+        match response.body {
+            ChunkMessageBody::GetResponse(ChunkGetResponse::Success { address, content }) => {
+                debug!(
+                    "Node {} retrieved chunk {} ({} bytes)",
+                    self.index,
+                    hex::encode(address),
+                    content.len()
+                );
+                Ok(Some(DataChunk::new(address, Bytes::from(content))))
             }
-            Ok(None) => Ok(None),
-            Err(e) => Err(TestnetError::Retrieval(format!(
-                "Failed to retrieve chunk: {e}"
-            ))),
+            ChunkMessageBody::GetResponse(ChunkGetResponse::NotFound { address }) => {
+                debug!(
+                    "Node {} chunk not found: {}",
+                    self.index,
+                    hex::encode(address)
+                );
+                Ok(None)
+            }
+            ChunkMessageBody::GetResponse(ChunkGetResponse::Error(e)) => {
+                Err(TestnetError::Retrieval(format!("Protocol error: {e}")))
+            }
+            _ => Err(TestnetError::Retrieval(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
-    /// Compute content address for chunk data.
+    // =========================================================================
+    // Remote Chunk Operations (via P2P network)
+    // =========================================================================
+
+    /// Store a chunk on a remote node via P2P.
+    ///
+    /// Sends a `ChunkPutRequest` to the target node over the P2P network
+    /// and waits for the `ChunkPutResponse`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either node is not running, the message cannot be
+    /// sent, the response times out, or the remote node reports an error.
+    pub async fn store_chunk_on(&self, target: &Self, data: &[u8]) -> Result<XorName> {
+        let target_p2p = target
+            .p2p_node
+            .as_ref()
+            .ok_or(TestnetError::NodeNotRunning)?;
+        let target_peer_id = target_p2p
+            .transport_peer_id()
+            .ok_or_else(|| TestnetError::Core("No transport peer ID available".to_string()))?;
+        self.store_chunk_on_peer(&target_peer_id, data).await
+    }
+
+    /// Store a chunk on a remote peer via P2P using the peer's ID directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this node is not running, the message cannot be
+    /// sent, the response times out, or the remote peer reports an error.
+    pub async fn store_chunk_on_peer(&self, target_peer_id: &str, data: &[u8]) -> Result<XorName> {
+        let p2p = self.p2p_node.as_ref().ok_or(TestnetError::NodeNotRunning)?;
+        let target_peer_id = target_peer_id.to_string();
+
+        // Create PUT request
+        let address = Self::compute_chunk_address(data);
+        let empty_payment = rmp_serde::to_vec(&ant_evm::ProofOfPayment {
+            peer_quotes: vec![],
+        })
+        .map_err(|e| {
+            TestnetError::Serialization(format!("Failed to serialize payment proof: {e}"))
+        })?;
+
+        let request_id: u64 = rand::thread_rng().gen();
+        let request = ChunkPutRequest::with_payment(address, data.to_vec(), empty_payment);
+        let message = ChunkMessage {
+            request_id,
+            body: ChunkMessageBody::PutRequest(request),
+        };
+        let message_bytes = message.encode().map_err(|e| {
+            TestnetError::Serialization(format!("Failed to encode PUT request: {e}"))
+        })?;
+
+        let timeout = Duration::from_secs(DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS);
+        let node_index = self.index;
+
+        send_and_await_chunk_response(
+            p2p,
+            &target_peer_id,
+            message_bytes,
+            request_id,
+            timeout,
+            |body| match body {
+                ChunkMessageBody::PutResponse(ChunkPutResponse::Success { address: addr }) => {
+                    debug!(
+                        "Node {} stored chunk on peer {}: {}",
+                        node_index,
+                        target_peer_id,
+                        hex::encode(addr)
+                    );
+                    Some(Ok(addr))
+                }
+                ChunkMessageBody::PutResponse(ChunkPutResponse::AlreadyExists {
+                    address: addr,
+                }) => {
+                    debug!(
+                        "Node {} chunk already exists on peer {}: {}",
+                        node_index,
+                        target_peer_id,
+                        hex::encode(addr)
+                    );
+                    Some(Ok(addr))
+                }
+                ChunkMessageBody::PutResponse(ChunkPutResponse::PaymentRequired { message }) => {
+                    Some(Err(TestnetError::Storage(format!(
+                        "Payment required: {message}"
+                    ))))
+                }
+                ChunkMessageBody::PutResponse(ChunkPutResponse::Error(e)) => Some(Err(
+                    TestnetError::Storage(format!("Remote protocol error: {e}")),
+                )),
+                _ => None,
+            },
+            |e| TestnetError::Storage(format!("Failed to send PUT to remote node: {e}")),
+            || {
+                TestnetError::Storage(format!(
+                    "Timeout waiting for remote store response after {DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS}s"
+                ))
+            },
+        )
+        .await
+    }
+
+    /// Retrieve a chunk from a remote node via P2P.
+    ///
+    /// Sends a `ChunkGetRequest` to the target node over the P2P network
+    /// and waits for the `ChunkGetResponse`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either node is not running, the message cannot be
+    /// sent, the response times out, or the remote node reports an error.
+    pub async fn get_chunk_from(
+        &self,
+        target: &Self,
+        address: &XorName,
+    ) -> Result<Option<DataChunk>> {
+        let target_p2p = target
+            .p2p_node
+            .as_ref()
+            .ok_or(TestnetError::NodeNotRunning)?;
+        let target_peer_id = target_p2p
+            .transport_peer_id()
+            .ok_or_else(|| TestnetError::Core("No transport peer ID available".to_string()))?;
+        self.get_chunk_from_peer(&target_peer_id, address).await
+    }
+
+    /// Retrieve a chunk from a remote peer via P2P using the peer's ID directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this node is not running, the message cannot be
+    /// sent, the response times out, or the remote peer reports an error.
+    pub async fn get_chunk_from_peer(
+        &self,
+        target_peer_id: &str,
+        address: &XorName,
+    ) -> Result<Option<DataChunk>> {
+        let p2p = self.p2p_node.as_ref().ok_or(TestnetError::NodeNotRunning)?;
+        let target_peer_id = target_peer_id.to_string();
+
+        // Create GET request
+        let request_id: u64 = rand::thread_rng().gen();
+        let request = ChunkGetRequest::new(*address);
+        let message = ChunkMessage {
+            request_id,
+            body: ChunkMessageBody::GetRequest(request),
+        };
+        let message_bytes = message.encode().map_err(|e| {
+            TestnetError::Serialization(format!("Failed to encode GET request: {e}"))
+        })?;
+
+        let timeout = Duration::from_secs(DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS);
+        let node_index = self.index;
+
+        send_and_await_chunk_response(
+            p2p,
+            &target_peer_id,
+            message_bytes,
+            request_id,
+            timeout,
+            |body| match body {
+                ChunkMessageBody::GetResponse(ChunkGetResponse::Success {
+                    address: addr,
+                    content,
+                }) => {
+                    debug!(
+                        "Node {} retrieved chunk from peer {}: {} ({} bytes)",
+                        node_index,
+                        target_peer_id,
+                        hex::encode(addr),
+                        content.len()
+                    );
+                    Some(Ok(Some(DataChunk::new(addr, Bytes::from(content)))))
+                }
+                ChunkMessageBody::GetResponse(ChunkGetResponse::NotFound { address: addr }) => {
+                    debug!(
+                        "Node {} chunk not found on peer {}: {}",
+                        node_index,
+                        target_peer_id,
+                        hex::encode(addr)
+                    );
+                    Some(Ok(None))
+                }
+                ChunkMessageBody::GetResponse(ChunkGetResponse::Error(e)) => Some(Err(
+                    TestnetError::Retrieval(format!("Remote protocol error: {e}")),
+                )),
+                _ => None,
+            },
+            |e| TestnetError::Retrieval(format!("Failed to send GET to remote node: {e}")),
+            || {
+                TestnetError::Retrieval(format!(
+                    "Timeout waiting for remote get response after {DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS}s"
+                ))
+            },
+        )
+        .await
+    }
+
+    /// Compute content address for chunk data (SHA256 hash).
     #[must_use]
     pub fn compute_chunk_address(data: &[u8]) -> XorName {
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        let hash = hasher.finalize();
-        let mut address = [0u8; 32];
-        address.copy_from_slice(&hash);
-        address
+        saorsa_node::compute_address(data)
     }
 }
 
@@ -576,6 +894,11 @@ impl TestNetwork {
     }
 
     /// Create a test node (but don't start it yet).
+    ///
+    /// Initializes the `AntProtocol` handler with:
+    /// - Disk storage in the node's data directory
+    /// - Payment verification disabled (for testing)
+    /// - Quote generation with a test rewards address
     async fn create_node(
         &self,
         index: usize,
@@ -592,6 +915,9 @@ impl TestNetwork {
 
         tokio::fs::create_dir_all(&data_dir).await?;
 
+        // Initialize AntProtocol for this node
+        let ant_protocol = Self::create_ant_protocol(&data_dir).await?;
+
         Ok(TestNode {
             index,
             node_id,
@@ -599,10 +925,51 @@ impl TestNetwork {
             address,
             data_dir,
             p2p_node: None,
+            ant_protocol: Some(Arc::new(ant_protocol)),
             is_bootstrap,
             state: Arc::new(RwLock::new(NodeState::Pending)),
             bootstrap_addrs,
+            protocol_task: None,
         })
+    }
+
+    /// Create an `AntProtocol` handler for a test node.
+    ///
+    /// Configures:
+    /// - Disk storage with verification enabled
+    /// - Payment verification disabled (for testing without Anvil)
+    /// - Quote generator with a test rewards address
+    async fn create_ant_protocol(data_dir: &std::path::Path) -> Result<AntProtocol> {
+        // Create disk storage
+        let storage_config = DiskStorageConfig {
+            root_dir: data_dir.to_path_buf(),
+            verify_on_read: true,
+            max_chunks: 0, // Unlimited for tests
+        };
+        let storage = DiskStorage::new(storage_config)
+            .await
+            .map_err(|e| TestnetError::Core(format!("Failed to create disk storage: {e}")))?;
+
+        // Create payment verifier with EVM disabled
+        let payment_config = PaymentVerifierConfig {
+            evm: EvmVerifierConfig {
+                enabled: false, // Disable EVM verification for tests
+                ..Default::default()
+            },
+            cache_capacity: TEST_PAYMENT_CACHE_CAPACITY,
+        };
+        let payment_verifier = PaymentVerifier::new(payment_config);
+
+        // Create quote generator with test rewards address
+        let rewards_address = RewardsAddress::new(TEST_REWARDS_ADDRESS);
+        let metrics_tracker = QuotingMetricsTracker::new(TEST_MAX_RECORDS, TEST_INITIAL_RECORDS);
+        let quote_generator = QuoteGenerator::new(rewards_address, metrics_tracker);
+
+        Ok(AntProtocol::new(
+            Arc::new(storage),
+            Arc::new(payment_verifier),
+            Arc::new(quote_generator),
+        ))
     }
 
     /// Start a single node.
@@ -632,6 +999,55 @@ impl TestNetwork {
 
         node.p2p_node = Some(Arc::new(p2p_node));
         *node.state.write().await = NodeState::Running;
+
+        // Start protocol handler that routes incoming P2P messages to AntProtocol
+        if let (Some(ref p2p), Some(ref protocol)) = (&node.p2p_node, &node.ant_protocol) {
+            let mut events = p2p.subscribe_events();
+            let p2p_clone = Arc::clone(p2p);
+            let protocol_clone = Arc::clone(protocol);
+            let node_index = node.index;
+            node.protocol_task = Some(tokio::spawn(async move {
+                while let Ok(event) = events.recv().await {
+                    if let P2PEvent::Message {
+                        topic,
+                        source,
+                        data,
+                    } = event
+                    {
+                        if topic == CHUNK_PROTOCOL_ID {
+                            debug!(
+                                "Node {} received chunk protocol message from {}",
+                                node_index, source
+                            );
+                            let protocol = Arc::clone(&protocol_clone);
+                            let p2p = Arc::clone(&p2p_clone);
+                            tokio::spawn(async move {
+                                match protocol.handle_message(&data).await {
+                                    Ok(response) => {
+                                        if let Err(e) = p2p
+                                            .send_message(
+                                                &source,
+                                                CHUNK_PROTOCOL_ID,
+                                                response.to_vec(),
+                                            )
+                                            .await
+                                        {
+                                            warn!(
+                                                "Node {} failed to send response to {}: {}",
+                                                node_index, source, e
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("Node {} protocol handler error: {}", node_index, e);
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            }));
+        }
 
         debug!("Node {} started successfully", node.index);
         self.nodes.push(node);
@@ -749,6 +1165,9 @@ impl TestNetwork {
         // Stop all nodes in reverse order
         for node in self.nodes.iter_mut().rev() {
             debug!("Stopping node {}", node.index);
+            if let Some(handle) = node.protocol_task.take() {
+                handle.abort();
+            }
             if let Some(ref p2p) = node.p2p_node {
                 if let Err(e) = p2p.shutdown().await {
                     warn!("Error shutting down node {}: {}", node.index, e);

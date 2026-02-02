@@ -16,12 +16,25 @@
 //! - **ML-DSA-65**: NIST FIPS 204 compliant signatures for authentication
 //! - **ChaCha20-Poly1305**: Symmetric encryption for data at rest
 
+use super::chunk_protocol::send_and_await_chunk_response;
 use super::data_types::{DataChunk, XorName};
+use crate::ant_protocol::{
+    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
+    ChunkPutResponse,
+};
 use crate::error::{Error, Result};
 use bytes::Bytes;
 use saorsa_core::P2PNode;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, info};
+
+/// Default timeout for network operations in seconds.
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Default number of replicas for data redundancy.
+const DEFAULT_REPLICA_COUNT: u8 = 4;
 
 /// Configuration for the quantum-resistant client.
 #[derive(Debug, Clone)]
@@ -37,8 +50,8 @@ pub struct QuantumConfig {
 impl Default for QuantumConfig {
     fn default() -> Self {
         Self {
-            timeout_secs: 30,
-            replica_count: 4,
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            replica_count: DEFAULT_REPLICA_COUNT,
             encrypt_data: true,
         }
     }
@@ -59,6 +72,7 @@ impl Default for QuantumConfig {
 pub struct QuantumClient {
     config: QuantumConfig,
     p2p_node: Option<Arc<P2PNode>>,
+    next_request_id: AtomicU64,
 }
 
 impl QuantumClient {
@@ -69,6 +83,7 @@ impl QuantumClient {
         Self {
             config,
             p2p_node: None,
+            next_request_id: AtomicU64::new(1),
         }
     }
 
@@ -85,7 +100,10 @@ impl QuantumClient {
         self
     }
 
-    /// Get a chunk from the saorsa network.
+    /// Get a chunk from the saorsa network via ANT protocol.
+    ///
+    /// Sends a `ChunkGetRequest` to a connected peer and waits for the
+    /// `ChunkGetResponse`.
     ///
     /// # Arguments
     ///
@@ -108,34 +126,65 @@ impl QuantumClient {
             return Err(Error::Network("P2P node not configured".into()));
         };
 
-        let _ = self.config.timeout_secs; // Use config for future timeout implementation
+        let target_peer = Self::pick_target_peer(node).await?;
 
-        // Lookup chunk in DHT
-        match node.dht_get(*address).await {
-            Ok(Some(data)) => {
-                debug!(
-                    "Found chunk {} on saorsa network ({} bytes)",
-                    hex::encode(address),
-                    data.len()
-                );
-                Ok(Some(DataChunk::new(*address, Bytes::from(data))))
-            }
-            Ok(None) => {
-                debug!("Chunk {} not found on saorsa network", hex::encode(address));
-                Ok(None)
-            }
-            Err(e) => Err(Error::Network(format!(
-                "DHT lookup failed for {}: {}",
-                hex::encode(address),
-                e
-            ))),
-        }
+        // Create and send GET request
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let request = ChunkGetRequest::new(*address);
+        let message = ChunkMessage {
+            request_id,
+            body: ChunkMessageBody::GetRequest(request),
+        };
+        let message_bytes = message
+            .encode()
+            .map_err(|e| Error::Network(format!("Failed to encode GET request: {e}")))?;
+
+        let timeout = Duration::from_secs(self.config.timeout_secs);
+        let addr_hex = hex::encode(address);
+        let timeout_secs = self.config.timeout_secs;
+
+        send_and_await_chunk_response(
+            node,
+            &target_peer,
+            message_bytes,
+            request_id,
+            timeout,
+            |body| match body {
+                ChunkMessageBody::GetResponse(ChunkGetResponse::Success {
+                    address: addr,
+                    content,
+                }) => {
+                    debug!(
+                        "Found chunk {} on saorsa network ({} bytes)",
+                        hex::encode(addr),
+                        content.len()
+                    );
+                    Some(Ok(Some(DataChunk::new(addr, Bytes::from(content)))))
+                }
+                ChunkMessageBody::GetResponse(ChunkGetResponse::NotFound { .. }) => {
+                    debug!("Chunk {} not found on saorsa network", addr_hex);
+                    Some(Ok(None))
+                }
+                ChunkMessageBody::GetResponse(ChunkGetResponse::Error(e)) => Some(Err(
+                    Error::Network(format!("Remote GET error for {addr_hex}: {e}")),
+                )),
+                _ => None,
+            },
+            |e| Error::Network(format!("Failed to send GET to peer {target_peer}: {e}")),
+            || {
+                Error::Network(format!(
+                    "Timeout waiting for chunk {addr_hex} after {timeout_secs}s"
+                ))
+            },
+        )
+        .await
     }
 
-    /// Store a chunk on the saorsa network.
+    /// Store a chunk on the saorsa network via ANT protocol.
     ///
     /// The chunk address is computed as SHA256(content), ensuring content-addressing.
-    /// The `P2PNode` handles ML-DSA-65 signing internally.
+    /// Sends a `ChunkPutRequest` to a connected peer and waits for the
+    /// `ChunkPutResponse`.
     ///
     /// # Arguments
     ///
@@ -149,42 +198,81 @@ impl QuantumClient {
     ///
     /// Returns an error if the store operation fails.
     pub async fn put_chunk(&self, content: Bytes) -> Result<XorName> {
-        use sha2::{Digest, Sha256};
-
         debug!("Storing chunk on saorsa network ({} bytes)", content.len());
 
         let Some(ref node) = self.p2p_node else {
             return Err(Error::Network("P2P node not configured".into()));
         };
 
+        let target_peer = Self::pick_target_peer(node).await?;
+
         // Compute content address using SHA-256
-        let mut hasher = Sha256::new();
-        hasher.update(&content);
-        let hash = hasher.finalize();
+        let address = crate::client::compute_address(&content);
 
-        let mut address = [0u8; 32];
-        address.copy_from_slice(&hash);
+        // Create PUT request with empty payment proof
+        let empty_payment = rmp_serde::to_vec(&ant_evm::ProofOfPayment {
+            peer_quotes: vec![],
+        })
+        .map_err(|e| Error::Network(format!("Failed to serialize payment proof: {e}")))?;
 
-        let _ = self.config.replica_count; // Used for future replication verification
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let request = ChunkPutRequest::with_payment(address, content.to_vec(), empty_payment);
+        let message = ChunkMessage {
+            request_id,
+            body: ChunkMessageBody::PutRequest(request),
+        };
+        let message_bytes = message
+            .encode()
+            .map_err(|e| Error::Network(format!("Failed to encode PUT request: {e}")))?;
 
-        // Store in DHT - P2PNode handles ML-DSA-65 signing internally
-        node.dht_put(address, content.to_vec()).await.map_err(|e| {
-            Error::Network(format!(
-                "DHT store failed for {}: {}",
-                hex::encode(address),
-                e
-            ))
-        })?;
+        let timeout = Duration::from_secs(self.config.timeout_secs);
+        let content_len = content.len();
+        let addr_hex = hex::encode(address);
+        let timeout_secs = self.config.timeout_secs;
 
-        info!(
-            "Chunk stored at address: {} ({} bytes)",
-            hex::encode(address),
-            content.len()
-        );
-        Ok(address)
+        send_and_await_chunk_response(
+            node,
+            &target_peer,
+            message_bytes,
+            request_id,
+            timeout,
+            |body| match body {
+                ChunkMessageBody::PutResponse(ChunkPutResponse::Success { address: addr }) => {
+                    info!(
+                        "Chunk stored at address: {} ({} bytes)",
+                        hex::encode(addr),
+                        content_len
+                    );
+                    Some(Ok(addr))
+                }
+                ChunkMessageBody::PutResponse(ChunkPutResponse::AlreadyExists {
+                    address: addr,
+                }) => {
+                    info!("Chunk already exists at address: {}", hex::encode(addr));
+                    Some(Ok(addr))
+                }
+                ChunkMessageBody::PutResponse(ChunkPutResponse::PaymentRequired { message }) => {
+                    Some(Err(Error::Network(format!("Payment required: {message}"))))
+                }
+                ChunkMessageBody::PutResponse(ChunkPutResponse::Error(e)) => Some(Err(
+                    Error::Network(format!("Remote PUT error for {addr_hex}: {e}")),
+                )),
+                _ => None,
+            },
+            |e| Error::Network(format!("Failed to send PUT to peer {target_peer}: {e}")),
+            || {
+                Error::Network(format!(
+                    "Timeout waiting for store response for {addr_hex} after {timeout_secs}s"
+                ))
+            },
+        )
+        .await
     }
 
     /// Check if a chunk exists on the saorsa network.
+    ///
+    /// Implemented via `get_chunk` — returns `Ok(true)` on success,
+    /// `Ok(false)` if not found.
     ///
     /// # Arguments
     ///
@@ -202,27 +290,16 @@ impl QuantumClient {
             "Checking existence on saorsa network: {}",
             hex::encode(address)
         );
+        self.get_chunk(address).await.map(|opt| opt.is_some())
+    }
 
-        let Some(ref node) = self.p2p_node else {
-            return Err(Error::Network("P2P node not configured".into()));
-        };
-
-        // Check if data exists in DHT
-        match node.dht_get(*address).await {
-            Ok(Some(_)) => {
-                debug!("Chunk {} exists on saorsa network", hex::encode(address));
-                Ok(true)
-            }
-            Ok(None) => {
-                debug!("Chunk {} not found on saorsa network", hex::encode(address));
-                Ok(false)
-            }
-            Err(e) => Err(Error::Network(format!(
-                "DHT lookup failed for {}: {}",
-                hex::encode(address),
-                e
-            ))),
-        }
+    /// Pick a target peer from the connected peers list.
+    async fn pick_target_peer(node: &P2PNode) -> Result<String> {
+        let peers = node.connected_peers().await;
+        peers
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Network("No connected peers available".into()))
     }
 }
 
@@ -234,15 +311,15 @@ mod tests {
     #[test]
     fn test_quantum_config_default() {
         let config = QuantumConfig::default();
-        assert_eq!(config.timeout_secs, 30);
-        assert_eq!(config.replica_count, 4);
+        assert_eq!(config.timeout_secs, DEFAULT_TIMEOUT_SECS);
+        assert_eq!(config.replica_count, DEFAULT_REPLICA_COUNT);
         assert!(config.encrypt_data);
     }
 
     #[test]
     fn test_quantum_client_creation() {
         let client = QuantumClient::with_defaults();
-        assert_eq!(client.config.timeout_secs, 30);
+        assert_eq!(client.config.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert!(client.p2p_node.is_none());
     }
 

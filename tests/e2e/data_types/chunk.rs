@@ -14,8 +14,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use sha2::{Digest, Sha256};
-
 use super::{TestData, MAX_CHUNK_SIZE};
 
 /// Size of small test data (1KB).
@@ -55,12 +53,7 @@ impl ChunkTestFixture {
     /// Compute content address for data (SHA256 hash).
     #[must_use]
     pub fn compute_address(data: &[u8]) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        let hash = hasher.finalize();
-        let mut address = [0u8; 32];
-        address.copy_from_slice(&hash);
-        address
+        saorsa_node::compute_address(data)
     }
 }
 
@@ -68,6 +61,7 @@ impl ChunkTestFixture {
 mod tests {
     use super::*;
     use crate::TestHarness;
+    use rand::seq::SliceRandom;
 
     /// Test 1: Content address computation is deterministic
     #[test]
@@ -132,7 +126,7 @@ mod tests {
     /// 4. Verifies data integrity
     ///
     /// Note: Cross-node retrieval is tested separately in `test_chunk_replication`.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_chunk_store_retrieve_small() {
         let harness = TestHarness::setup_minimal()
             .await
@@ -181,7 +175,7 @@ mod tests {
     }
 
     /// Test 7: Store and retrieve large chunk (4MB max).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_chunk_store_retrieve_large() {
         let harness = TestHarness::setup_minimal()
             .await
@@ -213,10 +207,77 @@ mod tests {
     }
 
     // =========================================================================
+    // Cross-Node Tests (require P2P network)
+    // =========================================================================
+
+    /// Test 8: One node asks another to store a chunk via P2P.
+    ///
+    /// This test validates the full cross-node protocol flow:
+    /// 1. Spins up a minimal 5-node local testnet
+    /// 2. A regular node (node 3) discovers connected peers
+    /// 3. Picks a random peer and sends a `ChunkPutRequest` to it
+    /// 4. The target node stores the chunk and responds with success
+    /// 5. The regular node then sends a `ChunkGetRequest` to retrieve it
+    /// 6. Verifies the data round-trips correctly
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_chunk_store_on_remote_node() {
+        let harness = TestHarness::setup_minimal()
+            .await
+            .expect("Failed to setup test harness");
+
+        let fixture = ChunkTestFixture::new();
+
+        // Node 3 (regular) discovers its connected peers and picks a random one
+        let requester = harness.test_node(3).expect("Node 3 should exist");
+        let peers = requester.connected_peers().await;
+        assert!(
+            !peers.is_empty(),
+            "Node 3 should have at least one connected peer"
+        );
+
+        let mut rng = rand::thread_rng();
+        let target_peer_id = peers.choose(&mut rng).expect("peers is non-empty");
+
+        let address = requester
+            .store_chunk_on_peer(target_peer_id, &fixture.small)
+            .await
+            .expect("Failed to store chunk on remote node");
+
+        // Verify the returned address matches the expected content hash
+        let expected_address = ChunkTestFixture::compute_address(&fixture.small);
+        assert_eq!(
+            address, expected_address,
+            "Returned address should match computed content address"
+        );
+
+        // Retrieve the chunk back from the same remote peer via P2P
+        let retrieved = requester
+            .get_chunk_from_peer(target_peer_id, &address)
+            .await
+            .expect("Failed to retrieve chunk from remote node");
+
+        let chunk = retrieved.expect("Chunk should exist on remote storage node");
+        assert_eq!(
+            chunk.content.as_ref(),
+            fixture.small.as_slice(),
+            "Retrieved data should match original"
+        );
+        assert_eq!(
+            chunk.address, address,
+            "Chunk address should match the stored address"
+        );
+
+        harness
+            .teardown()
+            .await
+            .expect("Failed to teardown harness");
+    }
+
+    // =========================================================================
     // Tests requiring additional infrastructure (not yet implemented)
     // =========================================================================
 
-    /// Test 8: Chunk replication across nodes.
+    /// Test 9: Chunk replication across nodes.
     ///
     /// Store on one node, retrieve from a different node.
     #[test]
@@ -242,7 +303,7 @@ mod tests {
     ///
     /// Chunks have a maximum size of 4MB. Attempting to store a larger
     /// chunk should fail with an appropriate error.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_chunk_reject_oversized() {
         let harness = TestHarness::setup_minimal()
             .await

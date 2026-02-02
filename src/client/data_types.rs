@@ -5,6 +5,18 @@
 //! the address is the SHA256 hash of the content.
 
 use bytes::Bytes;
+use sha2::{Digest, Sha256};
+
+/// Compute the content address (SHA256 hash) for the given data.
+#[must_use]
+pub fn compute_address(content: &[u8]) -> XorName {
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    let result = hasher.finalize();
+    let mut address = [0u8; 32];
+    address.copy_from_slice(&result);
+    address
+}
 
 /// A content-addressed identifier (32 bytes).
 ///
@@ -39,12 +51,7 @@ impl DataChunk {
     /// Create a chunk from content, computing the address automatically.
     #[must_use]
     pub fn from_content(content: Bytes) -> Self {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&content);
-        let result = hasher.finalize();
-        let mut address = [0u8; 32];
-        address.copy_from_slice(&result);
+        let address = compute_address(&content);
         Self { address, content }
     }
 
@@ -57,11 +64,7 @@ impl DataChunk {
     /// Verify that the address matches SHA256(content).
     #[must_use]
     pub fn verify(&self) -> bool {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&self.content);
-        let result = hasher.finalize();
-        self.address == result.as_slice()
+        self.address == compute_address(&self.content)
     }
 }
 

@@ -24,11 +24,10 @@ path = "src/bin/keygen.rs"
 
 [dependencies]
 # Core (provides EVERYTHING: networking, DHT, security, trust, storage)
-saorsa-core = { version = "0.10.0", default-features = false }
+saorsa-core = "0.10.2"
 saorsa-pqc = "0.4.0"
 
 # Payment verification - autonomi network lookup + EVM payment
-autonomi = "0.9"
 ant-evm = "0.1.19"
 evmlib = "0.4.7"
 xor_name = "5"
@@ -79,12 +78,14 @@ tempfile = "3"
 flate2 = "1"
 tar = "0.4"
 
+# Protocol serialization
+bincode = "1"
+
 [dev-dependencies]
 tokio-test = "0.4"
 proptest = "1"
 serde_json = "1"
 rand = "0.8"
-bincode = "1"
 
 # E2E test infrastructure
 [[test]]
