@@ -8,7 +8,7 @@
 //! Each test node includes an `AntProtocol` handler that processes chunk
 //! PUT/GET requests using the autonomi protocol messages. This allows E2E
 //! tests to validate the complete protocol flow including:
-//! - Message encoding/decoding (bincode serialization)
+//! - Message encoding/decoding (postcard serialization)
 //! - Content address verification
 //! - Payment verification (when enabled)
 //! - Disk storage persistence

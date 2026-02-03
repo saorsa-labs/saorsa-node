@@ -4,9 +4,8 @@
 //! is the SHA256 hash of the content. Maximum size is 4MB.
 //!
 //! This module defines the wire protocol messages for chunk operations
-//! using bincode serialization for compact, fast encoding.
+//! using postcard serialization for compact, fast encoding.
 
-use bincode::Options;
 use serde::{Deserialize, Serialize};
 
 /// Protocol identifier for chunk operations.
@@ -17,14 +16,6 @@ pub const PROTOCOL_VERSION: u16 = 1;
 
 /// Maximum chunk size in bytes (4MB).
 pub const MAX_CHUNK_SIZE: usize = 4 * 1024 * 1024;
-
-/// Maximum wire message size for deserialization.
-///
-/// Set to `MAX_CHUNK_SIZE` + 1 MB headroom for the envelope (`request_id`,
-/// enum discriminants, address, payment proof, etc.).  This prevents a
-/// malicious peer from sending a length-prefixed `Vec` that causes an
-/// unbounded allocation.
-const MAX_WIRE_MESSAGE_SIZE: u64 = (MAX_CHUNK_SIZE + 1024 * 1024) as u64;
 
 /// Data type identifier for chunks.
 pub const DATA_TYPE_CHUNK: u32 = 0;
@@ -66,29 +57,23 @@ pub struct ChunkMessage {
 }
 
 impl ChunkMessage {
-    /// Encode the message to bytes using bincode.
+    /// Encode the message to bytes using postcard.
     ///
     /// # Errors
     ///
     /// Returns an error if serialization fails.
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
-        bincode::DefaultOptions::new()
-            .with_limit(MAX_WIRE_MESSAGE_SIZE)
-            .allow_trailing_bytes()
-            .serialize(self)
+        postcard::to_stdvec(self)
             .map_err(|e| ProtocolError::SerializationFailed(e.to_string()))
     }
 
-    /// Decode a message from bytes using bincode.
+    /// Decode a message from bytes using postcard.
     ///
     /// # Errors
     ///
     /// Returns an error if deserialization fails.
     pub fn decode(data: &[u8]) -> Result<Self, ProtocolError> {
-        bincode::DefaultOptions::new()
-            .with_limit(MAX_WIRE_MESSAGE_SIZE)
-            .allow_trailing_bytes()
-            .deserialize(data)
+        postcard::from_bytes(data)
             .map_err(|e| ProtocolError::DeserializationFailed(e.to_string()))
     }
 }

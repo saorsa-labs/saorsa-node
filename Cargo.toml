@@ -1,6 +1,6 @@
 [package]
 name = "saorsa-node"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 authors = ["David Irvine <david.irvine@maidsafe.net>"]
 description = "Pure quantum-proof network node for the Saorsa decentralized network"
@@ -79,7 +79,7 @@ flate2 = "1"
 tar = "0.4"
 
 # Protocol serialization
-bincode = "1"
+postcard = { version = "1.1", features = ["use-std"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
