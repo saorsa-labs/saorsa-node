@@ -73,7 +73,6 @@ pub async fn send_and_await_chunk_response<T, E>(
             Ok(Ok(_)) => {}
             Ok(Err(RecvError::Lagged(skipped))) => {
                 debug!("Chunk protocol events lagged by {skipped} messages, continuing");
-                continue;
             }
             Ok(Err(RecvError::Closed)) | Err(_) => break,
         }

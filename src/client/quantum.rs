@@ -154,20 +154,16 @@ impl QuantumClient {
                     address: addr,
                     content,
                 }) => {
-                    if addr != *address {
-                        warn!(
-                            "Peer returned chunk {} but we requested {}",
-                            hex::encode(addr),
-                            addr_hex
-                        );
-                        Some(Err(Error::InvalidChunk(format!(
-                            "Mismatched chunk address: expected {}, got {}",
-                            addr_hex,
-                            hex::encode(addr)
-                        ))))
-                    } else {
+                    if addr == *address {
                         let computed = crate::client::compute_address(&content);
-                        if computed != addr {
+                        if computed == addr {
+                            debug!(
+                                "Found chunk {} on saorsa network ({} bytes)",
+                                hex::encode(addr),
+                                content.len()
+                            );
+                            Some(Ok(Some(DataChunk::new(addr, Bytes::from(content)))))
+                        } else {
                             warn!(
                                 "Peer returned chunk {} with invalid content hash {}",
                                 addr_hex,
@@ -178,14 +174,18 @@ impl QuantumClient {
                                 addr_hex,
                                 hex::encode(computed)
                             ))))
-                        } else {
-                            debug!(
-                                "Found chunk {} on saorsa network ({} bytes)",
-                                hex::encode(addr),
-                                content.len()
-                            );
-                            Some(Ok(Some(DataChunk::new(addr, Bytes::from(content)))))
                         }
+                    } else {
+                        warn!(
+                            "Peer returned chunk {} but we requested {}",
+                            hex::encode(addr),
+                            addr_hex
+                        );
+                        Some(Err(Error::InvalidChunk(format!(
+                            "Mismatched chunk address: expected {}, got {}",
+                            addr_hex,
+                            hex::encode(addr)
+                        ))))
                     }
                 }
                 ChunkMessageBody::GetResponse(ChunkGetResponse::NotFound { .. }) => {

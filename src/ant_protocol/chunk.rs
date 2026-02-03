@@ -63,8 +63,7 @@ impl ChunkMessage {
     ///
     /// Returns an error if serialization fails.
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
-        postcard::to_stdvec(self)
-            .map_err(|e| ProtocolError::SerializationFailed(e.to_string()))
+        postcard::to_stdvec(self).map_err(|e| ProtocolError::SerializationFailed(e.to_string()))
     }
 
     /// Decode a message from bytes using postcard.
@@ -73,8 +72,7 @@ impl ChunkMessage {
     ///
     /// Returns an error if deserialization fails.
     pub fn decode(data: &[u8]) -> Result<Self, ProtocolError> {
-        postcard::from_bytes(data)
-            .map_err(|e| ProtocolError::DeserializationFailed(e.to_string()))
+        postcard::from_bytes(data).map_err(|e| ProtocolError::DeserializationFailed(e.to_string()))
     }
 }
 
