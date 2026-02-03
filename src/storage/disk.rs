@@ -12,8 +12,10 @@
 use crate::ant_protocol::XorName;
 use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio::task::spawn_blocking;
 use tracing::{debug, trace, warn};
 
 /// Configuration for disk storage.
@@ -52,6 +54,8 @@ pub struct StorageStats {
     pub duplicates: u64,
     /// Number of verification failures on read.
     pub verification_failures: u64,
+    /// Number of chunks currently persisted on disk.
+    pub current_chunks: u64,
 }
 
 /// Content-addressed disk storage.
@@ -65,6 +69,8 @@ pub struct DiskStorage {
     config: DiskStorageConfig,
     /// Operation statistics.
     stats: parking_lot::RwLock<StorageStats>,
+    /// Current number of chunks on disk.
+    current_chunks: AtomicU64,
 }
 
 impl DiskStorage {
@@ -82,9 +88,16 @@ impl DiskStorage {
 
         debug!("Initialized disk storage at {:?}", config.root_dir);
 
+        let scan_dir = chunks_dir.clone();
+        let existing_chunks = spawn_blocking(move || Self::count_existing_chunks(&scan_dir))
+            .await
+            .map_err(|e| Error::Storage(format!("Failed to count chunks: {e}")))?
+            .map_err(|e| Error::Storage(format!("Failed to count chunks: {e}")))?;
+
         Ok(Self {
             config,
             stats: parking_lot::RwLock::new(StorageStats::default()),
+            current_chunks: AtomicU64::new(existing_chunks),
         })
     }
 
@@ -128,41 +141,74 @@ impl DiskStorage {
         }
 
         // Enforce max_chunks capacity limit (0 = unlimited)
+        let mut reserved_slot = false;
+        let mut increment_after_commit = false;
         if self.config.max_chunks > 0 {
-            let chunks_stored = self.stats.read().chunks_stored;
-            if chunks_stored >= self.config.max_chunks as u64 {
-                return Err(Error::Storage(format!(
-                    "Storage capacity reached: {} chunks stored, max is {}",
-                    chunks_stored, self.config.max_chunks
-                )));
+            let max_chunks = self.config.max_chunks as u64;
+            match self
+                .current_chunks
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                    if current >= max_chunks {
+                        None
+                    } else {
+                        Some(current + 1)
+                    }
+                }) {
+                Ok(_) => {
+                    reserved_slot = true;
+                }
+                Err(current) => {
+                    return Err(Error::Storage(format!(
+                        "Storage capacity reached: {} chunks stored, max is {}",
+                        current, self.config.max_chunks
+                    )));
+                }
             }
+        } else {
+            increment_after_commit = true;
         }
+
+        let mut release_slot = || {
+            if reserved_slot {
+                self.current_chunks.fetch_sub(1, Ordering::SeqCst);
+                reserved_slot = false;
+            }
+        };
 
         // Ensure parent directories exist
         if let Some(parent) = chunk_path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| Error::Storage(format!("Failed to create shard directory: {e}")))?;
+            fs::create_dir_all(parent).await.map_err(|e| {
+                release_slot();
+                Error::Storage(format!("Failed to create shard directory: {e}"))
+            })?;
         }
 
         // Atomic write: temp file + rename
         let temp_path = chunk_path.with_extension("tmp");
-        let mut file = fs::File::create(&temp_path)
-            .await
-            .map_err(|e| Error::Storage(format!("Failed to create temp file: {e}")))?;
+        let mut file = fs::File::create(&temp_path).await.map_err(|e| {
+            release_slot();
+            Error::Storage(format!("Failed to create temp file: {e}"))
+        })?;
 
-        file.write_all(content)
-            .await
-            .map_err(|e| Error::Storage(format!("Failed to write chunk: {e}")))?;
+        file.write_all(content).await.map_err(|e| {
+            release_slot();
+            Error::Storage(format!("Failed to write chunk: {e}"))
+        })?;
 
-        file.flush()
-            .await
-            .map_err(|e| Error::Storage(format!("Failed to flush chunk: {e}")))?;
+        file.flush().await.map_err(|e| {
+            release_slot();
+            Error::Storage(format!("Failed to flush chunk: {e}"))
+        })?;
 
         // Rename for atomic commit
-        fs::rename(&temp_path, &chunk_path)
-            .await
-            .map_err(|e| Error::Storage(format!("Failed to rename temp file: {e}")))?;
+        fs::rename(&temp_path, &chunk_path).await.map_err(|e| {
+            release_slot();
+            Error::Storage(format!("Failed to rename temp file: {e}"))
+        })?;
+
+        if increment_after_commit {
+            self.current_chunks.fetch_add(1, Ordering::SeqCst);
+        }
 
         {
             let mut stats = self.stats.write();
@@ -261,6 +307,8 @@ impl DiskStorage {
             .await
             .map_err(|e| Error::Storage(format!("Failed to delete chunk: {e}")))?;
 
+        self.current_chunks.fetch_sub(1, Ordering::SeqCst);
+
         debug!("Deleted chunk {}", hex::encode(address));
 
         Ok(true)
@@ -269,7 +317,9 @@ impl DiskStorage {
     /// Get storage statistics.
     #[must_use]
     pub fn stats(&self) -> StorageStats {
-        self.stats.read().clone()
+        let mut stats = self.stats.read().clone();
+        stats.current_chunks = self.current_chunks.load(Ordering::SeqCst);
+        stats
     }
 
     /// Get the path for a chunk.
@@ -297,6 +347,24 @@ impl DiskStorage {
     #[must_use]
     pub fn root_dir(&self) -> &Path {
         &self.config.root_dir
+    }
+
+    fn count_existing_chunks(dir: &Path) -> std::io::Result<u64> {
+        if !dir.exists() {
+            return Ok(0);
+        }
+
+        let mut count = 0u64;
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                count += Self::count_existing_chunks(&path)?;
+            } else if matches!(path.extension().and_then(|ext| ext.to_str()), Some("chunk")) {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 }
 
@@ -489,5 +557,31 @@ mod tests {
             content1.len() as u64 + content2.len() as u64
         );
         assert_eq!(stats.bytes_retrieved, content1.len() as u64);
+        assert_eq!(stats.current_chunks, 2);
+    }
+
+    #[tokio::test]
+    async fn test_capacity_recovers_after_delete() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let config = DiskStorageConfig {
+            root_dir: temp_dir.path().to_path_buf(),
+            verify_on_read: true,
+            max_chunks: 1,
+        };
+        let storage = DiskStorage::new(config).await.expect("create storage");
+
+        let first = b"first chunk";
+        let second = b"second chunk";
+        let addr1 = DiskStorage::compute_address(first);
+        let addr2 = DiskStorage::compute_address(second);
+
+        storage.put(&addr1, first).await.expect("put first");
+        storage.delete(&addr1).await.expect("delete first");
+
+        // Should succeed because delete freed capacity.
+        storage.put(&addr2, second).await.expect("put second");
+
+        let stats = storage.stats();
+        assert_eq!(stats.current_chunks, 1);
     }
 }

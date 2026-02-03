@@ -14,7 +14,7 @@
 //!
 //! # Protocol Overview
 //!
-//! The protocol uses bincode serialization for compact, fast encoding.
+//! The protocol uses postcard serialization for compact, fast encoding.
 //! Each data type has its own message types for PUT/GET operations.
 //!
 //! ## Chunk Messages
