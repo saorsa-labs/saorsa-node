@@ -24,7 +24,7 @@ path = "src/bin/keygen.rs"
 
 [dependencies]
 # Core (provides EVERYTHING: networking, DHT, security, trust, storage)
-saorsa-core = "0.10.2"
+saorsa-core = "0.10.4"
 saorsa-pqc = "0.4.0"
 
 # Payment verification - autonomi network lookup + EVM payment
