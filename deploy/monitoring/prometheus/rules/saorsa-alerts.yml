@@ -137,16 +137,6 @@ groups:
           summary: "High geographic diversity rejections"
           description: "Node {{ $labels.instance }} is rejecting {{ $value | humanize }}/s peers due to geographic diversity enforcement"
 
-      # Data Attestation Failures (NEW in 0.7.6)
-      - alert: SaorsaAttestationFailureRate
-        expr: (rate(saorsa_attestation_challenges_failed_total[5m]) / rate(saorsa_attestation_challenges_sent_total[5m])) > 0.1
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "High attestation failure rate"
-          description: "Node {{ $labels.instance }} has {{ $value | humanizePercentage }} attestation challenge failure rate"
-
       # Trust Threshold Violations (NEW in 0.7.6)
       - alert: SaorsaTrustViolationsHigh
         expr: rate(saorsa_trust_threshold_violations_total[5m]) > 0.05

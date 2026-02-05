@@ -24,7 +24,7 @@ path = "src/bin/keygen.rs"
 
 [dependencies]
 # Core (provides EVERYTHING: networking, DHT, security, trust, storage)
-saorsa-core = "0.10.2"
+saorsa-core = "0.10.4"
 saorsa-pqc = "0.4.0"
 
 # Payment verification - autonomi network lookup + EVM payment
@@ -96,19 +96,6 @@ path = "tests/e2e/mod.rs"
 default = []
 # Enable additional diagnostics for development
 dev = []
-
-# Attestation verification features - SECURITY IMPLICATIONS
-# Without either feature, attestation uses mock verification (NO CRYPTOGRAPHIC SECURITY)
-#
-# zkvm-prover: STARK-based verification (POST-QUANTUM SECURE)
-#   - Requires sp1-sdk and toolchain
-#   - Heavier dependency but provides full cryptographic security
-zkvm-prover = ["saorsa-core/zkvm-prover"]
-
-# zkvm-verifier-groth16: Groth16/PLONK verification (NOT POST-QUANTUM SECURE)
-#   - Uses BN254 elliptic curves
-#   - Lighter dependency but vulnerable to quantum attacks
-zkvm-verifier-groth16 = ["saorsa-core/zkvm-verifier-groth16"]
 
 [profile.release]
 lto = true
