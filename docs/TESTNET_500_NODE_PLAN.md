@@ -13,7 +13,6 @@
 #### New in 0.7.6
 | Feature | Description |
 |---------|-------------|
-| `attestation_challenges_*` | Data attestation challenge tracking (sent/passed/failed) |
 | `trust_threshold_violations_total` | Trust threshold violation counter |
 | `low_trust_nodes_current` | Current count of nodes below trust threshold |
 | `enforcement_mode_strict` | Enforcement mode status (permissive/strict) |
@@ -43,7 +42,7 @@
 #### New Metrics System (60+ Prometheus Metrics)
 | Category | Metrics Count | Examples |
 |----------|---------------|----------|
-| Security | 20+ | eclipse_score, sybil_score, collusion_score, attestation_*, diversity_rejections |
+| Security | 20+ | eclipse_score, sybil_score, collusion_score, diversity_rejections |
 | DHT Health | 12+ | routing_table_size, replication_health, lookup_latency |
 | Trust | 12+ | eigentrust_avg, witness_receipts, interactions, low_trust_nodes, enforcement_mode |
 | Placement | 10+ | geographic_diversity, load_balance_score, capacity, nodes_per_region |
@@ -55,7 +54,7 @@
 - Adversarial testing infrastructure
 
 ### Bug Fixes from 0.7.3
-- Routing maintenance module (attestation, eviction, liveness, refresh)
+- Routing maintenance module (eviction, liveness, refresh)
 - Weighted shard distribution favoring headless devices
 - Deadlock fix in storage API functions
 
@@ -98,7 +97,6 @@
 | Bucket refresh | Periodic refresh works | `dht_bucket_refresh_total` increases |
 | Liveness checking | Dead nodes detected | `dht_liveness_failures_total` > 0 when nodes die |
 | Node eviction | Misbehaving nodes removed | `dht_security_nodes_evicted_total` correlates |
-| Attestation | Data challenges succeed | Success rate > 95% |
 
 ### 2.3 Sibling Broadcast (NEW in 0.7.4)
 | Test | Description | Pass Criteria |
@@ -259,22 +257,7 @@
 | `nodes_per_region{region="..."}` | Even distribution | Single region > 40% |
 | Regions covered | ≥ 3 | < 3 regions |
 
-### 5.10 Data Attestation (NEW in 0.7.6)
-| Test | Description | Pass Criteria |
-|------|-------------|---------------|
-| Challenge sending | Attestation challenges sent to nodes | `attestation_challenges_sent_total` increases during refresh |
-| Challenge success | Valid nodes pass attestation | `attestation_challenges_passed_total` > 95% of sent |
-| Challenge failure detection | Invalid/offline nodes fail | `attestation_challenges_failed_total` logged |
-| Failure consequences | Failed nodes tracked/evicted | Correlates with eviction metrics |
-| Challenge frequency | Regular challenge intervals | Challenges sent during routing refresh |
-
-| Metric | Target | Alert Threshold |
-|--------|--------|-----------------|
-| Attestation success rate | > 95% | < 90% |
-| `attestation_challenges_failed_total` (rate) | < 5/min | > 10/min |
-| Challenge coverage | All nodes challenged periodically | < 80% coverage |
-
-### 5.11 Trust Enforcement (NEW in 0.7.6)
+### 5.10 Trust Enforcement (NEW in 0.7.6)
 | Test | Description | Pass Criteria |
 |------|-------------|---------------|
 | Trust violations | Low trust nodes flagged | `trust_threshold_violations_total` tracked |
@@ -405,8 +388,8 @@
 | Day 3 | Payment & data operations (Phase 3-4) |
 | Day 4 | Security testing - Sybil, Eclipse, Collusion (Phase 5.1-5.4) |
 | Day 5 | Security testing - Close Group, BFT, Trust (Phase 5.5-5.7) |
-| Day 6 | Security testing - IP/Geo Diversity, Attestation (Phase 5.8-5.10) NEW |
-| Day 7 | Security testing - Trust Enforcement, Close Group Analysis (Phase 5.11-5.12) NEW |
+| Day 6 | Security testing - IP/Geo Diversity (Phase 5.8-5.9) |
+| Day 7 | Security testing - Trust Enforcement, Close Group Analysis (Phase 5.10-5.11) |
 | Day 8 | Performance benchmarks (Phase 6) |
 | Day 9 | Chaos + adversarial testing (Phase 7) |
 
@@ -420,7 +403,6 @@
 - [ ] Payment quotes generated successfully
 - [ ] No memory leaks (stable RSS over 24h)
 - [ ] All security scores < 0.3 (no active attacks)
-- [ ] Attestation success rate > 95%
 - [ ] Low trust nodes < 10% of network
 
 ### Production Readiness

@@ -10,7 +10,7 @@ mod probe_tests {
         let core_config = CoreNodeConfig::new().unwrap();
         println!("CoreConfig: {core_config:?}");
 
-        // Probe DiversityConfig for attestation
+        // Probe DiversityConfig
         let diversity = IPDiversityConfig::default();
         println!("Diversity: {diversity:?}");
 

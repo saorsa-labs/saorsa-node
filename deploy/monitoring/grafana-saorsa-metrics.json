@@ -156,36 +156,9 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "saorsa_attestation_challenges_sent_total{instance=~\"$instance\"}",
-          "legendFormat": "attestation_challenges_sent (0.7.6)",
-          "refId": "G"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "saorsa_attestation_challenges_passed_total{instance=~\"$instance\"}",
-          "legendFormat": "attestation_challenges_passed (0.7.6)",
-          "refId": "H"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "saorsa_attestation_challenges_failed_total{instance=~\"$instance\"}",
-          "legendFormat": "attestation_challenges_failed (0.7.6)",
-          "refId": "I"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "saorsa_trust_threshold_violations_total{instance=~\"$instance\"}",
           "legendFormat": "trust_threshold_violations (0.7.6)",
-          "refId": "J"
+          "refId": "G"
         }
       ],
       "title": "Security Counters",
@@ -314,15 +287,6 @@
           "expr": "rate(saorsa_ip_diversity_rejections_total{instance=~\"$instance\"}[5m])",
           "legendFormat": "IP Diversity Reject",
           "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "rate(saorsa_attestation_challenges_failed_total{instance=~\"$instance\"}[5m])",
-          "legendFormat": "Attestation Failed",
-          "refId": "D"
         }
       ],
       "title": "Security Events Over Time",

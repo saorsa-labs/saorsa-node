@@ -40,7 +40,6 @@
 #![warn(clippy::pedantic)]
 
 pub mod ant_protocol;
-pub mod attestation;
 pub mod client;
 pub mod config;
 pub mod error;
