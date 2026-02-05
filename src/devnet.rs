@@ -32,9 +32,6 @@ pub const DEVNET_PORT_RANGE_MIN: u16 = 20_000;
 /// Maximum port for random devnet allocation.
 pub const DEVNET_PORT_RANGE_MAX: u16 = 60_000;
 
-/// Maximum nodes supported in a devnet.
-pub const MAX_DEVNET_NODE_COUNT: usize = 1000;
-
 // =============================================================================
 // Default Timing Constants
 // =============================================================================
@@ -307,7 +304,7 @@ impl Devnet {
     /// # Errors
     ///
     /// Returns `DevnetError::Config` if the configuration is invalid (e.g. bootstrap
-    /// count exceeds node count, port range overflow, or node count exceeds maximum).
+    /// count exceeds node count or port range overflow).
     /// Returns `DevnetError::Io` if the data directory cannot be created.
     pub async fn new(mut config: DevnetConfig) -> Result<Self> {
         if config.bootstrap_count >= config.node_count {
@@ -322,18 +319,12 @@ impl Devnet {
             ));
         }
 
-        if config.node_count > MAX_DEVNET_NODE_COUNT {
-            return Err(DevnetError::Config(format!(
-                "Node count {} exceeds maximum {}",
-                config.node_count, MAX_DEVNET_NODE_COUNT
-            )));
-        }
-
         if config.base_port == 0 {
             let mut rng = rand::thread_rng();
-            // node_count is validated <= MAX_DEVNET_NODE_COUNT (1000) above, fits u16
-            #[allow(clippy::cast_possible_truncation)]
-            let max_base_port = DEVNET_PORT_RANGE_MAX.saturating_sub(config.node_count as u16);
+            let node_count_u16 = u16::try_from(config.node_count).map_err(|_| {
+                DevnetError::Config(format!("Node count {} exceeds u16::MAX", config.node_count))
+            })?;
+            let max_base_port = DEVNET_PORT_RANGE_MAX.saturating_sub(node_count_u16);
             config.base_port = rng.gen_range(DEVNET_PORT_RANGE_MIN..max_base_port);
         }
 
