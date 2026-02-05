@@ -43,6 +43,7 @@ pub mod ant_protocol;
 pub mod attestation;
 pub mod client;
 pub mod config;
+pub mod devnet;
 pub mod error;
 pub mod event;
 pub mod node;
@@ -58,6 +59,7 @@ pub use ant_protocol::{
 };
 pub use client::{compute_address, DataChunk, QuantumClient, QuantumConfig, XorName};
 pub use config::{BootstrapCacheConfig, NodeConfig, StorageConfig};
+pub use devnet::{Devnet, DevnetConfig, DevnetManifest};
 pub use error::{Error, Result};
 pub use event::{NodeEvent, NodeEventsChannel};
 pub use node::{NodeBuilder, RunningNode};
