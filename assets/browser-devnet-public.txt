@@ -1,0 +1,6 @@
+Hello from an Autonomi browser-enabled local testnet.
+
+This immutable file was published into node storage when ant-devnet started.
+The web application discovers its BLAKE3 address from the browser manifest,
+performs the closest-node lookup itself, downloads the bytes directly from a
+storage node over WebRTC Direct, and verifies the content address in-browser.

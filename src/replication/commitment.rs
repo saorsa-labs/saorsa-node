@@ -372,7 +372,7 @@ pub fn verify_path(
     let mut cur = *leaf;
     let mut i = leaf_index;
     for sibling in path {
-        cur = if i % 2 == 0 {
+        cur = if i.is_multiple_of(2) {
             node_hash(&cur, sibling)
         } else {
             node_hash(sibling, &cur)

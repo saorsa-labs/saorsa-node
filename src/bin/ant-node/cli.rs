@@ -28,6 +28,27 @@ pub struct Cli {
     #[arg(long, env = "ANT_IPV4_ONLY")]
     pub ipv4_only: bool,
 
+    /// Override the default ADR-0009 WebRTC Direct UDP bind address.
+    ///
+    /// Port zero selects the stable automatic port derived from `--port`.
+    #[arg(long, env = "ANT_WEBRTC_DIRECT_BIND")]
+    pub webrtc_direct_bind: Option<SocketAddr>,
+
+    /// Override the UDP port used by the WebRTC Direct listener.
+    ///
+    /// This takes precedence over the port in `--webrtc-direct-bind`. Port zero
+    /// selects the automatic port derived from the native QUIC listener.
+    #[arg(long, visible_alias = "webrtc-port", env = "ANT_WEBRTC_DIRECT_PORT")]
+    pub webrtc_direct_port: Option<u16>,
+
+    /// Literal public UDP address to advertise instead of the bind address.
+    #[arg(
+        long,
+        env = "ANT_WEBRTC_DIRECT_ADVERTISED_ADDR",
+        requires = "webrtc_direct_bind"
+    )]
+    pub webrtc_direct_advertised_addr: Option<SocketAddr>,
+
     /// Bootstrap peer addresses.
     #[arg(long, short, env = "ANT_BOOTSTRAP")]
     pub bootstrap: Vec<SocketAddr>,
@@ -230,6 +251,17 @@ impl Cli {
 
         config.port = self.port;
         config.ipv4_only = self.ipv4_only;
+        if let Some(bind) = self.webrtc_direct_bind {
+            config.webrtc_direct.enabled = true;
+            config.webrtc_direct.bind = bind;
+        }
+        if let Some(port) = self.webrtc_direct_port {
+            config.webrtc_direct.enabled = true;
+            config.webrtc_direct.bind.set_port(port);
+        }
+        if let Some(addr) = self.webrtc_direct_advertised_addr {
+            config.webrtc_direct.advertised_addr = Some(addr);
+        }
         #[cfg(feature = "logging")]
         {
             config.log_level = self.log_level.into();
@@ -330,5 +362,51 @@ impl From<CliNetworkMode> for NetworkMode {
             CliNetworkMode::Testnet => Self::Testnet,
             CliNetworkMode::Development => Self::Development,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn webrtc_direct_port_overrides_the_default_bind_port() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let cli = Cli::try_parse_from(["ant-node", "--webrtc-direct-port", "45000"])?;
+        let (config, _) = cli.into_config()?;
+
+        assert!(config.webrtc_direct.enabled);
+        assert_eq!(config.webrtc_direct.bind.port(), 45_000);
+        Ok(())
+    }
+
+    #[test]
+    fn webrtc_direct_port_overrides_only_the_explicit_bind_port(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "ant-node",
+            "--webrtc-direct-bind",
+            "127.0.0.1:40000",
+            "--webrtc-direct-port",
+            "45000",
+        ])?;
+        let (config, _) = cli.into_config()?;
+
+        assert_eq!(
+            config.webrtc_direct.bind.ip(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
+        assert_eq!(config.webrtc_direct.bind.port(), 45_000);
+        Ok(())
+    }
+
+    #[test]
+    fn webrtc_port_alias_is_supported() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(["ant-node", "--webrtc-port", "45000"])?;
+
+        assert_eq!(cli.webrtc_direct_port, Some(45_000));
+        Ok(())
     }
 }

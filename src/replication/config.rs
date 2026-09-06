@@ -846,13 +846,13 @@ pub const AUDIT_ON_GOSSIP_COOLDOWN_SECS: u64 = 30 * 60;
 /// cooldown. Finer than the cooldown itself so a monetized commitment is
 /// first-audited promptly after its peer's window reopens; the retry just
 /// re-checks a small per-peer map, so the tick is cheap.
-pub const FIRST_AUDIT_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+pub const FIRST_AUDIT_RETRY_INTERVAL: Duration = Duration::from_mins(1);
 
 /// Interval for the cumulative first-audit scheduler observability summary.
 ///
 /// Deliberately low frequency: this is intended for fleet-level Elasticsearch
 /// aggregation without recreating the high-volume logging load it measures.
-pub const FIRST_AUDIT_SUMMARY_INTERVAL: Duration = Duration::from_secs(5 * 60);
+pub const FIRST_AUDIT_SUMMARY_INTERVAL: Duration = Duration::from_mins(5);
 
 /// ADR-0004: max monetized-pin events the first-audit drainer drains from its
 /// channel per wake before it must run the audit-launch phase.
@@ -875,7 +875,7 @@ pub const FIRST_AUDIT_DRAIN_BATCH: usize = 64;
 /// [`FIRST_AUDIT_BUDGET_BURST`] more in the first hour); steady-state demand
 /// sits far below it because nomination is paid-pin-only and re-nominations
 /// are suppressed by [`FIRST_AUDIT_PEER_REAUDIT_INTERVAL`].
-pub const FIRST_AUDIT_LAUNCH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+pub const FIRST_AUDIT_LAUNCH_INTERVAL: Duration = Duration::from_mins(5);
 
 /// ADR-0004 Amendment 2: token-bucket capacity for monetized first-audit
 /// launches.
@@ -918,7 +918,7 @@ pub const FIRST_AUDIT_LAUNCH_JITTER_MAX: Duration = Duration::from_secs(30);
 /// only, so no gossip-lottery audit can ever cover them). Kept comfortably
 /// inside the 3h answerability TTL so a re-nomination after the window still
 /// lands in-window. Gossip-lottery re-audits are unaffected.
-pub const FIRST_AUDIT_PEER_REAUDIT_INTERVAL: Duration = Duration::from_secs(2 * 3600);
+pub const FIRST_AUDIT_PEER_REAUDIT_INTERVAL: Duration = Duration::from_hours(2);
 
 /// ADR-0004 Amendment 2: committed-count jump that overrides the per-peer
 /// re-audit window, as a ratio (`new > old * NUM / DEN`, integer math).
@@ -1433,10 +1433,7 @@ mod tests {
     #[test]
     fn default_prune_hysteresis_is_three_days() {
         let config = ReplicationConfig::default();
-        assert_eq!(
-            config.prune_hysteresis_duration,
-            Duration::from_secs(3 * 24 * 60 * 60)
-        );
+        assert_eq!(config.prune_hysteresis_duration, Duration::from_hours(72));
     }
 
     #[test]
@@ -2000,8 +1997,8 @@ mod tests {
     #[test]
     fn scenario_31_audit_cadence_within_jitter_bounds() {
         let config = ReplicationConfig {
-            audit_tick_interval_min: Duration::from_secs(600),
-            audit_tick_interval_max: Duration::from_secs(1200),
+            audit_tick_interval_min: Duration::from_mins(10),
+            audit_tick_interval_max: Duration::from_mins(20),
             ..ReplicationConfig::default()
         };
 

@@ -608,7 +608,7 @@ mod tests {
             .last_sync_times
             .insert(peer_id_from_byte(3), Instant::now());
 
-        let cooldown = Duration::from_secs(3600); // 1 hour
+        let cooldown = Duration::from_hours(1); // 1 hour
         let batch = select_sync_batch(&mut state, 2, cooldown);
 
         // Peer 1 and peer 3 should be skipped (removed from order).
@@ -668,7 +668,7 @@ mod tests {
             .last_sync_times
             .insert(peer_id_from_byte(2), Instant::now());
 
-        let cooldown = Duration::from_secs(3600);
+        let cooldown = Duration::from_hours(1);
         let batch = select_sync_batch(&mut state, 4, cooldown);
 
         assert!(batch.is_empty());
@@ -806,7 +806,7 @@ mod tests {
         let peers: Vec<PeerId> = (1..=8).map(peer_id_from_byte).collect();
         let mut state = NeighborSyncState::new_cycle(peers);
         let batch_size = 4;
-        let cooldown = Duration::from_secs(3600);
+        let cooldown = Duration::from_hours(1);
 
         // Mark peers 2 and 4 as recently synced (on cooldown).
         state
@@ -1019,7 +1019,7 @@ mod tests {
             peer_id_from_byte(3),
         ];
         let mut state = NeighborSyncState::new_cycle(peers);
-        let cooldown = Duration::from_secs(3600);
+        let cooldown = Duration::from_hours(1);
 
         // Mark peer 2 as recently synced.
         state
@@ -1105,7 +1105,7 @@ mod tests {
         let peer_count: u8 = 10;
         let peers: Vec<PeerId> = (1..=peer_count).map(peer_id_from_byte).collect();
         let mut state = NeighborSyncState::new_cycle(peers);
-        let cooldown = Duration::from_secs(3600);
+        let cooldown = Duration::from_hours(1);
 
         // Mark all peers as recently synced.
         for i in 1..=peer_count {
@@ -1309,7 +1309,7 @@ mod tests {
 
         // The preserved cooldowns cause peers 1,2 to be removed, leaving
         // only peer 3 selected.
-        let cooldown = Duration::from_secs(3600);
+        let cooldown = Duration::from_hours(1);
         let batch = select_sync_batch(&mut new_state, 3, cooldown);
         assert_eq!(
             batch,

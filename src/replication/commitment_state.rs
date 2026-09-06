@@ -334,7 +334,7 @@ const MAX_RETAINED_GOSSIPED_SLOTS: usize = 16;
 /// stops being gossiped the pruner reclaims it promptly. At
 /// `RETAINED_GOSSIPED_COMMITMENTS = 2` this is `(2 + 1) ×` the 1 h rotation
 /// interval = 3 h.
-pub(crate) const GOSSIP_ANSWERABILITY_TTL: Duration = Duration::from_secs(3 * 3600);
+pub(crate) const GOSSIP_ANSWERABILITY_TTL: Duration = Duration::from_hours(3);
 
 /// Extra answerability margin applied ONLY when reloading retention after a
 /// restart (ADR-0004 A1). A gossip-stamp refresh in the last persist window may
@@ -344,7 +344,7 @@ pub(crate) const GOSSIP_ANSWERABILITY_TTL: Duration = Duration::from_secs(3 * 36
 /// which is harmless — it only makes the responder answer a little longer, and a
 /// data-deleter still fails the round-2 slice challenge). Sized well above the
 /// persist interval + gossip cadence, far below the TTL.
-const RESTART_STAMP_GRACE: Duration = Duration::from_secs(5 * 60);
+const RESTART_STAMP_GRACE: Duration = Duration::from_mins(5);
 
 /// One persisted retention slot (ADR-0004 A1): the signed commitment, its
 /// committed key set (so the tree can be rebuilt without re-reading chunks), and

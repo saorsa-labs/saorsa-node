@@ -615,7 +615,7 @@ async fn test_attack_merkle_pay_yourself_fabricated_pool() -> Result<(), Box<dyn
     // matched-count step (matched < CANDIDATE_CLOSENESS_REQUIRED).
     let mut config = TestNetworkConfig::minimal();
     config.node_count = 14;
-    config.stabilization_timeout = Duration::from_secs(60);
+    config.stabilization_timeout = Duration::from_mins(1);
     let harness = TestHarness::setup_with_config(config).await?;
     // Let routing tables settle so find_closest_nodes_network returns a
     // stable set.

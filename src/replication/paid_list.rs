@@ -1129,7 +1129,7 @@ mod tests {
         // cannot represent the backdated time (the claim-age assertion is
         // skipped in that case since the subtraction itself proves nothing
         // about production behaviour).
-        let grace_plus_margin = grace_period + std::time::Duration::from_secs(3600);
+        let grace_plus_margin = grace_period + std::time::Duration::from_hours(1);
         let first_seen = Instant::now()
             .checked_sub(grace_plus_margin)
             .unwrap_or_else(Instant::now);

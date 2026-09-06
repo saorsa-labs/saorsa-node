@@ -28,6 +28,19 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "webrtc-direct")]
+use crate::ant_protocol::{ChunkMessage, ChunkMessageBody, ChunkPutRequest, ChunkPutResponse};
+#[cfg(feature = "webrtc-direct")]
+use crate::browser::{
+    browser_payment_network, BrowserBootstrapNode, BrowserPaymentNetwork, BrowserPublicFile,
+};
+#[cfg(feature = "webrtc-direct")]
+use crate::config::WebRtcDirectConfig;
+#[cfg(feature = "webrtc-direct")]
+use bytes::Bytes;
+#[cfg(feature = "webrtc-direct")]
+use std::collections::HashMap;
+
 // =============================================================================
 // Devnet Constants
 // =============================================================================
@@ -215,6 +228,12 @@ pub struct DevnetConfig {
     /// Optional IPv4 to advertise to peers/clients (LAN devnet). When `Some`,
     /// nodes bind 0.0.0.0 and advertise this IP instead of 127.0.0.1.
     pub advertise_ip: Option<Ipv4Addr>,
+
+    /// Run one direct-browser WebRTC Direct listener per devnet node.
+    pub webrtc_direct: bool,
+
+    /// First UDP port in the WebRTC Direct node range (0 = allocate).
+    pub webrtc_direct_base_port: u16,
 }
 
 impl Default for DevnetConfig {
@@ -237,6 +256,8 @@ impl Default for DevnetConfig {
             cleanup_data_dir: true,
             evm_network: None,
             advertise_ip: None,
+            webrtc_direct: false,
+            webrtc_direct_base_port: 0,
         }
     }
 }
@@ -320,6 +341,10 @@ pub struct DevnetNode {
     state: Arc<RwLock<NodeState>>,
     bootstrap_addrs: Vec<MultiAddr>,
     protocol_task: Option<JoinHandle<()>>,
+    #[cfg(feature = "webrtc-direct")]
+    webrtc_direct_task: Option<JoinHandle<()>>,
+    #[cfg(feature = "webrtc-direct")]
+    browser_endpoint: Option<crate::browser::BrowserEndpoint>,
 }
 
 impl DevnetNode {
@@ -340,6 +365,8 @@ pub struct Devnet {
     shutdown: CancellationToken,
     state: Arc<RwLock<NetworkState>>,
     health_monitor: Option<JoinHandle<()>>,
+    #[cfg(feature = "webrtc-direct")]
+    browser_endpoint_catalog: Arc<crate::web_rtc::BrowserEndpointCatalog>,
 }
 
 impl Devnet {
@@ -350,6 +377,7 @@ impl Devnet {
     /// Returns `DevnetError::Config` if the configuration is invalid (e.g. bootstrap
     /// count exceeds node count or port range overflow).
     /// Returns `DevnetError::Io` if the data directory cannot be created.
+    #[allow(clippy::too_many_lines)]
     pub async fn new(mut config: DevnetConfig) -> Result<Self> {
         if config.bootstrap_count >= config.node_count {
             return Err(DevnetError::Config(
@@ -388,6 +416,64 @@ impl Devnet {
             )));
         }
 
+        #[cfg(not(feature = "webrtc-direct"))]
+        if config.webrtc_direct {
+            return Err(DevnetError::Config(
+                "WebRtcDirect devnet support requires the 'webrtc-direct' feature".to_string(),
+            ));
+        }
+
+        #[cfg(feature = "webrtc-direct")]
+        if config.webrtc_direct {
+            if config.webrtc_direct_base_port == 0 {
+                let adjacent = max_port;
+                let adjacent_end = adjacent.checked_add(node_count_u16);
+                config.webrtc_direct_base_port = if adjacent_end
+                    .is_some_and(|end| end <= DEVNET_PORT_RANGE_MAX)
+                {
+                    adjacent
+                } else if let Some(before) = base_port
+                    .checked_sub(node_count_u16)
+                    .filter(|before| *before >= DEVNET_PORT_RANGE_MIN)
+                {
+                    before
+                } else {
+                    let mut rng = rand::thread_rng();
+                    let max_base = DEVNET_PORT_RANGE_MAX.saturating_sub(node_count_u16);
+                    (0..128)
+                        .map(|_| rng.gen_range(DEVNET_PORT_RANGE_MIN..max_base))
+                        .find(|candidate| {
+                            let end = candidate.saturating_add(node_count_u16);
+                            end <= base_port || *candidate >= max_port
+                        })
+                        .ok_or_else(|| {
+                            DevnetError::Config(
+                                "Could not allocate a disjoint WebRtcDirect port range".to_string(),
+                            )
+                        })?
+                };
+            }
+
+            let webrtc_direct_end = config
+                .webrtc_direct_base_port
+                .checked_add(node_count_u16)
+                .ok_or_else(|| {
+                    DevnetError::Config("WebRtcDirect port range overflow".to_string())
+                })?;
+            if config.webrtc_direct_base_port < DEVNET_PORT_RANGE_MIN
+                || webrtc_direct_end > DEVNET_PORT_RANGE_MAX
+            {
+                return Err(DevnetError::Config(format!(
+                    "WebRtcDirect ports must remain in the local test range {DEVNET_PORT_RANGE_MIN}..{DEVNET_PORT_RANGE_MAX}"
+                )));
+            }
+            if base_port < webrtc_direct_end && config.webrtc_direct_base_port < max_port {
+                return Err(DevnetError::Config(
+                    "Native and WebRtcDirect devnet port ranges overlap".to_string(),
+                ));
+            }
+        }
+
         tokio::fs::create_dir_all(&config.data_dir).await?;
 
         Ok(Self {
@@ -396,6 +482,8 @@ impl Devnet {
             shutdown: CancellationToken::new(),
             state: Arc::new(RwLock::new(NetworkState::Uninitialized)),
             health_monitor: None,
+            #[cfg(feature = "webrtc-direct")]
+            browser_endpoint_catalog: Arc::new(crate::web_rtc::BrowserEndpointCatalog::default()),
         })
     }
 
@@ -448,6 +536,15 @@ impl Devnet {
             if let Some(handle) = node.protocol_task.take() {
                 handle.abort();
             }
+            #[cfg(feature = "webrtc-direct")]
+            if let Some(handle) = node.webrtc_direct_task.take() {
+                if let Err(error) = handle.await {
+                    warn!(
+                        "Error stopping node {} WebRtcDirect listener: {error}",
+                        node.index
+                    );
+                }
+            }
 
             let node_index = node.index;
             let node_state = Arc::clone(&node.state);
@@ -494,6 +591,210 @@ impl Devnet {
                 )))
             })
             .collect()
+    }
+
+    /// Get every direct browser endpoint in this devnet.
+    #[cfg(feature = "webrtc-direct")]
+    #[must_use]
+    pub fn browser_endpoints(&self) -> Vec<BrowserBootstrapNode> {
+        self.nodes
+            .iter()
+            .filter_map(|node| {
+                node.browser_endpoint
+                    .clone()
+                    .map(|endpoint| BrowserBootstrapNode { endpoint })
+            })
+            .collect()
+    }
+
+    /// Publish a complete self-encrypted file to the browser-enabled devnet.
+    ///
+    /// The file is split using the same `self_encryption` crate as `ant-client`.
+    /// Every encrypted data chunk and the public `MessagePack` `DataMap` are then
+    /// submitted through each node's ordinary chunk PUT handler. Address
+    /// verification, DHT responsibility, payment-cache admission, and LMDB
+    /// integrity checks therefore remain active.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when WebRTC Direct is disabled, self-encryption fails,
+    /// a generated chunk is too large, no node admits a required record, or
+    /// protocol serialization fails.
+    #[cfg(feature = "webrtc-direct")]
+    pub async fn publish_public_file(
+        &self,
+        name: String,
+        content_type: String,
+        content: &[u8],
+    ) -> Result<BrowserPublicFile> {
+        if !self.config.webrtc_direct {
+            return Err(DevnetError::Config(
+                "Cannot publish a browser file when WebRtcDirect is disabled".to_string(),
+            ));
+        }
+        if content.len() < self_encryption::MIN_ENCRYPTABLE_BYTES {
+            return Err(DevnetError::Config(format!(
+                "Public file is {} bytes; self-encryption requires at least {} bytes",
+                content.len(),
+                self_encryption::MIN_ENCRYPTABLE_BYTES
+            )));
+        }
+
+        let (published_data_map, encrypted_chunks) =
+            self_encryption::encrypt(Bytes::copy_from_slice(content)).map_err(|error| {
+                DevnetError::Core(format!("Failed to self-encrypt browser file: {error}"))
+            })?;
+        let mut records = HashMap::<[u8; 32], Bytes>::new();
+        for chunk in encrypted_chunks {
+            if chunk.content.len() > crate::ant_protocol::MAX_CHUNK_SIZE {
+                return Err(DevnetError::Core(format!(
+                    "Self-encryption produced a {}-byte chunk; node maximum is {}",
+                    chunk.content.len(),
+                    crate::ant_protocol::MAX_CHUNK_SIZE
+                )));
+            }
+            let address = crate::client::compute_address(&chunk.content);
+            records.entry(address).or_insert(chunk.content);
+        }
+
+        let mut get_local_chunk = |address: self_encryption::XorName| {
+            records.get(&address.0).cloned().ok_or_else(|| {
+                self_encryption::Error::Generic(format!(
+                    "Self-encryption output omitted chunk {}",
+                    hex::encode(address.0)
+                ))
+            })
+        };
+        let root_data_map =
+            self_encryption::get_root_data_map(published_data_map.clone(), &mut get_local_chunk)
+                .map_err(|error| {
+                    DevnetError::Core(format!("Failed to resolve browser file DataMap: {error}"))
+                })?;
+        let serialized_data_map = rmp_serde::to_vec(&published_data_map).map_err(|error| {
+            DevnetError::Core(format!("Failed to serialize browser file DataMap: {error}"))
+        })?;
+        let data_map_size = serialized_data_map.len();
+        let data_map_address = crate::client::compute_address(&serialized_data_map);
+        records.insert(data_map_address, Bytes::from(serialized_data_map));
+
+        let record_count = records.len();
+        let mut replicas = usize::MAX;
+        for (address, bytes) in &records {
+            replicas = replicas.min(self.publish_browser_record(*address, bytes).await?);
+        }
+
+        let chunks = root_data_map
+            .infos()
+            .iter()
+            .map(|info| crate::browser::BrowserChunkInfo {
+                index: info.index,
+                dst_hash: hex::encode(info.dst_hash.0),
+                src_hash: hex::encode(info.src_hash.0),
+                src_size: info.src_size,
+            })
+            .collect();
+        let published = BrowserPublicFile {
+            name,
+            address: hex::encode(data_map_address),
+            size: content.len(),
+            content_type,
+            blake3: hex::encode(crate::client::compute_address(content)),
+            data_map_size,
+            chunks,
+            replicas,
+        };
+        info!(
+            "Published browser devnet file '{}' at {} as {record_count} record(s), each on at least {} node(s)",
+            published.name, published.address, published.replicas
+        );
+        Ok(published)
+    }
+
+    /// Public EVM configuration advertised to direct browser clients.
+    #[cfg(feature = "webrtc-direct")]
+    #[must_use]
+    pub fn browser_payment_network(&self) -> BrowserPaymentNetwork {
+        let network = self
+            .config
+            .evm_network
+            .as_ref()
+            .unwrap_or(&EvmNetwork::ArbitrumOne);
+        browser_payment_network(network)
+    }
+
+    #[cfg(feature = "webrtc-direct")]
+    async fn publish_browser_record(&self, address: [u8; 32], content: &Bytes) -> Result<usize> {
+        let mut replicas = 0usize;
+        let mut failures = Vec::new();
+
+        for node in &self.nodes {
+            let Some(protocol) = node.ant_protocol.as_ref() else {
+                failures.push(format!("node {} has no protocol handler", node.index));
+                continue;
+            };
+            protocol
+                .payment_verifier_arc()
+                .cache_insert_browser_devnet_seed(address);
+
+            let request = ChunkMessage {
+                request_id: u64::try_from(node.index).unwrap_or(u64::MAX),
+                body: ChunkMessageBody::PutRequest(ChunkPutRequest::new(address, content.clone())),
+            };
+            let request_bytes = request.encode().map_err(|error| {
+                DevnetError::Core(format!("Failed to encode public-file PUT: {error}"))
+            })?;
+            let response_bytes = protocol
+                .try_handle_request(&request_bytes)
+                .await
+                .map_err(|error| {
+                    DevnetError::Core(format!(
+                        "Node {} public-file PUT failed: {error}",
+                        node.index
+                    ))
+                })?
+                .ok_or_else(|| {
+                    DevnetError::Core(format!(
+                        "Node {} returned no public-file PUT response",
+                        node.index
+                    ))
+                })?;
+            let response = ChunkMessage::decode(&response_bytes).map_err(|error| {
+                DevnetError::Core(format!(
+                    "Failed to decode node {} public-file response: {error}",
+                    node.index
+                ))
+            })?;
+            match response.body {
+                ChunkMessageBody::PutResponse(
+                    ChunkPutResponse::Success { .. } | ChunkPutResponse::AlreadyExists { .. },
+                ) => {
+                    replicas += 1;
+                }
+                ChunkMessageBody::PutResponse(other) => {
+                    failures.push(format!("node {}: {other:?}", node.index));
+                }
+                other => failures.push(format!(
+                    "node {} returned unexpected response {other:?}",
+                    node.index
+                )),
+            }
+        }
+
+        if replicas == 0 {
+            return Err(DevnetError::Startup(format!(
+                "No devnet node admitted browser record {}: {}",
+                hex::encode(address),
+                failures.join("; ")
+            )));
+        }
+        if !failures.is_empty() {
+            debug!(
+                "Browser record was admitted by {replicas} nodes; {} non-responsible/failed nodes: {}",
+                failures.len(),
+                failures.join("; ")
+            );
+        }
+        Ok(replicas)
     }
 
     async fn start_bootstrap_nodes(&mut self) -> Result<()> {
@@ -587,6 +888,10 @@ impl Devnet {
             state: Arc::new(RwLock::new(NodeState::Pending)),
             bootstrap_addrs,
             protocol_task: None,
+            #[cfg(feature = "webrtc-direct")]
+            webrtc_direct_task: None,
+            #[cfg(feature = "webrtc-direct")]
+            browser_endpoint: None,
         })
     }
 
@@ -638,6 +943,7 @@ impl Devnet {
         ))
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn start_node(&mut self, mut node: DevnetNode) -> Result<()> {
         debug!("Starting node {} on port {}", node.index, node.port);
         *node.state.write().await = NodeState::Starting;
@@ -674,6 +980,62 @@ impl Devnet {
 
         node.p2p_node = Some(Arc::new(p2p_node));
         *node.state.write().await = NodeState::Running;
+
+        #[cfg(feature = "webrtc-direct")]
+        if self.config.webrtc_direct {
+            let index_u16 = u16::try_from(node.index).map_err(|_| {
+                DevnetError::Config(format!("Node index {} exceeds u16::MAX", node.index))
+            })?;
+            let port = self
+                .config
+                .webrtc_direct_base_port
+                .checked_add(index_u16)
+                .ok_or_else(|| {
+                    DevnetError::Config(format!(
+                        "WebRtcDirect port overflow for node {}",
+                        node.index
+                    ))
+                })?;
+            let advertised_ip = self.config.advertise_ip.unwrap_or(Ipv4Addr::LOCALHOST);
+            let bind_ip = self
+                .config
+                .advertise_ip
+                .map_or(Ipv4Addr::LOCALHOST, |_| Ipv4Addr::UNSPECIFIED);
+            let webrtc_direct_config = WebRtcDirectConfig {
+                enabled: true,
+                bind: SocketAddr::from((bind_ip, port)),
+                advertised_addr: Some(SocketAddr::from((advertised_ip, port))),
+                ..WebRtcDirectConfig::default()
+            };
+
+            let p2p = node.p2p_node.clone().ok_or_else(|| {
+                DevnetError::Startup(format!(
+                    "Node {} lost its P2P handle before WebRtcDirect startup",
+                    node.index
+                ))
+            })?;
+            let server = crate::web_rtc::spawn(
+                &webrtc_direct_config,
+                &node.data_dir,
+                p2p,
+                node.ant_protocol.clone(),
+                self.config
+                    .evm_network
+                    .as_ref()
+                    .unwrap_or(&EvmNetwork::ArbitrumOne),
+                self.shutdown.clone(),
+                Some(Arc::clone(&self.browser_endpoint_catalog)),
+            )
+            .await
+            .map_err(|error| {
+                DevnetError::Startup(format!(
+                    "Failed to start node {} WebRtcDirect listener: {error}",
+                    node.index
+                ))
+            })?;
+            node.browser_endpoint = Some(server.endpoint);
+            node.webrtc_direct_task = Some(server.task);
+        }
 
         if let (Some(ref p2p), Some(ref protocol)) = (&node.p2p_node, &node.ant_protocol) {
             // Wire P2P into AntProtocol for payment-proof closeness checks.

@@ -61,7 +61,7 @@ pub const MAX_PROVERS_PER_KEY: usize = 16;
 /// before re-audit is required. 40 min comfortably covers one audit
 /// cycle on the average peer while still requiring re-proof inside the
 /// rotation window.
-pub const PROVER_ENTRY_TTL: Duration = Duration::from_secs(40 * 60);
+pub const PROVER_ENTRY_TTL: Duration = Duration::from_mins(40);
 
 /// One cached prover entry: who proved the key, when, and against which
 /// commitment.

@@ -617,6 +617,10 @@ let harness = TestHarness::setup_with_evm().await?;
 assert!(harness.anvil().is_healthy().await);
 ```
 
+For the direct-browser testnet, where every node exposes WebRTC Direct and a
+default immutable file is published at startup, see
+[Browser-enabled local testnet](docs/WEBRTC_DIRECT_TESTNET.md).
+
 ### Roadmap
 
 | Phase | Target | Status |
@@ -858,7 +862,7 @@ ant-node
 
 ### Prerequisites
 
-- Rust 1.75+ (for building from source)
+- Rust 1.91+ (for building from source)
 - Linux, macOS, or Windows
 
 ### Build from Source

@@ -22,7 +22,7 @@
 //!
 //! # LAN devnet backed by Arbitrum Sepolia, manifest served over HTTP
 //! ant-devnet --preset small --host 192.168.1.100 \
-//!     --evm-network arbitrum-sepolia --serve-port 8088
+//!     --evm-network arbitrum-sepolia --serve-port 25000
 //! ```
 
 #![cfg_attr(not(feature = "logging"), allow(unused_variables))]
@@ -33,10 +33,12 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod cli;
 
 use ant_node::devnet::{Devnet, DevnetConfig, DevnetEvmInfo, DevnetManifest};
+use ant_node::BrowserDevnetManifest;
 use clap::Parser;
 use cli::Cli;
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
@@ -86,6 +88,13 @@ async fn main() -> color_eyre::Result<()> {
         config.stabilization_timeout = std::time::Duration::from_secs(timeout_secs);
     }
 
+    #[cfg(not(feature = "webrtc-direct"))]
+    if cli.webrtc_direct {
+        return Err(color_eyre::eyre::eyre!(
+            "--webrtc-direct requires a binary built with --features webrtc-direct"
+        ));
+    }
+
     // A non-unicast --host would stamp unreachable bootstrap addresses into the
     // manifest (LAN mode would fail non-obviously), so reject it early.
     if let Some(host) = cli
@@ -98,7 +107,14 @@ async fn main() -> color_eyre::Result<()> {
         ));
     }
     config.advertise_ip = cli.host;
-    let evm_info = resolve_evm_info(
+    config.webrtc_direct = cli.webrtc_direct;
+    if let Some(base_port) = cli.webrtc_direct_base_port {
+        config.webrtc_direct_base_port = base_port;
+    }
+    let ResolvedEvm {
+        manifest: evm_info,
+        local_testnet: _local_evm_testnet,
+    } = resolve_evm_info(
         cli.evm_network.as_deref(),
         cli.enable_evm,
         cli.host,
@@ -109,16 +125,43 @@ async fn main() -> color_eyre::Result<()> {
     let mut devnet = Devnet::new(config).await?;
     devnet.start().await?;
 
+    let created_at = chrono::Utc::now().to_rfc3339();
+
+    #[cfg(feature = "webrtc-direct")]
+    let browser_manifest = if cli.webrtc_direct {
+        let (name, content_type, content) = load_public_file(cli.public_file.as_deref()).await?;
+        let public_file = devnet
+            .publish_public_file(name, content_type, &content)
+            .await?;
+        let network_id = format!("local-devnet-{}-{}", devnet.config().base_port, created_at);
+        Some(BrowserDevnetManifest::new(
+            network_id,
+            created_at.clone(),
+            devnet.browser_endpoints(),
+            devnet.browser_payment_network(),
+            vec![public_file],
+        ))
+    } else {
+        None
+    };
+
+    #[cfg(not(feature = "webrtc-direct"))]
+    let browser_manifest: Option<BrowserDevnetManifest> = None;
+
     let manifest = DevnetManifest {
         base_port: devnet.config().base_port,
         node_count: devnet.config().node_count,
         bootstrap: devnet.bootstrap_addrs(),
         data_dir: devnet.config().data_dir.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at,
         evm: evm_info,
     };
 
     let json = serde_json::to_string_pretty(&manifest)?;
+    let browser_json = browser_manifest
+        .as_ref()
+        .map(serde_json::to_string_pretty)
+        .transpose()?;
     if let Some(path) = cli.manifest {
         tokio::fs::write(&path, &json).await?;
         ant_node::logging::info!("Wrote manifest to {}", path.display());
@@ -128,8 +171,18 @@ async fn main() -> color_eyre::Result<()> {
 
     // Optional read-only HTTP API so LAN devices fetch the manifest instead of
     // copying files (GET /api/devnet-manifest.json + /api/info).
-    if let Some(port) = cli.serve_port {
-        serve_manifest_api(port, cli.host, &manifest, json.clone())?;
+    let serve_port = cli
+        .serve_port
+        .or_else(|| cli.webrtc_direct.then_some(25_000));
+    if let Some(port) = serve_port {
+        serve_manifest_api(
+            port,
+            cli.host,
+            &manifest,
+            json.clone(),
+            browser_manifest.as_ref(),
+            browser_json,
+        )?;
     }
 
     ant_node::logging::info!("Devnet running. Press Ctrl+C to stop.");
@@ -139,16 +192,88 @@ async fn main() -> color_eyre::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "webrtc-direct")]
+async fn load_public_file(
+    path: Option<&std::path::Path>,
+) -> color_eyre::Result<(String, String, Vec<u8>)> {
+    const DEFAULT_NAME: &str = "autonomi-browser-testnet.txt";
+    const DEFAULT_SEED: &[u8] = include_bytes!("../../../assets/browser-devnet-public.txt");
+    const DEFAULT_SIZE: usize = 5 * 1024 * 1024;
+    const MAX_FILE_SIZE: u64 = 1_000_000_000;
+
+    let Some(path) = path else {
+        let mut content = Vec::with_capacity(DEFAULT_SIZE);
+        while content.len() < DEFAULT_SIZE {
+            content.extend_from_slice(DEFAULT_SEED);
+        }
+        content.truncate(DEFAULT_SIZE);
+        return Ok((
+            DEFAULT_NAME.to_string(),
+            "text/plain; charset=utf-8".to_string(),
+            content,
+        ));
+    };
+
+    let name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            color_eyre::eyre::eyre!(
+                "--public-file must identify a file with a valid UTF-8 filename"
+            )
+        })?
+        .to_string();
+    let file_size = tokio::fs::metadata(path)
+        .await
+        .map_err(|error| {
+            color_eyre::eyre::eyre!("failed to inspect public file {}: {error}", path.display())
+        })?
+        .len();
+    if file_size > MAX_FILE_SIZE {
+        return Err(color_eyre::eyre::eyre!(
+            "--public-file is {file_size} bytes; the browser devnet limit is {MAX_FILE_SIZE} bytes"
+        ));
+    }
+    let content = tokio::fs::read(path).await.map_err(|error| {
+        color_eyre::eyre::eyre!("failed to read public file {}: {error}", path.display())
+    })?;
+    let content_type = match path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("txt" | "md" | "csv") => "text/plain; charset=utf-8",
+        Some("json") => "application/json",
+        Some("html" | "htm") => "text/html; charset=utf-8",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("pdf") => "application/pdf",
+        _ => "application/octet-stream",
+    }
+    .to_string();
+
+    Ok((name, content_type, content))
+}
+
 /// Resolve which EVM backing the devnet uses, updating `config` accordingly:
 /// an **external** network (`--evm-network`, e.g. Arbitrum Sepolia verified
 /// against the real deployed contracts, no embedded wallet key); a **local
 /// Anvil** chain (`--enable-evm`); or **none**. External takes precedence.
+struct ResolvedEvm {
+    manifest: Option<DevnetEvmInfo>,
+    // Retain ownership until main exits so the Anvil child is terminated on
+    // normal shutdown instead of being orphaned.
+    local_testnet: Option<evmlib::testnet::Testnet>,
+}
+
 async fn resolve_evm_info(
     evm_network: Option<&str>,
     enable_evm: bool,
     host: Option<std::net::Ipv4Addr>,
     config: &mut DevnetConfig,
-) -> color_eyre::Result<Option<DevnetEvmInfo>> {
+) -> color_eyre::Result<ResolvedEvm> {
     if let Some(net_name) = evm_network {
         let network = match net_name {
             "arbitrum-sepolia" => evmlib::Network::ArbitrumSepoliaTest,
@@ -165,12 +290,15 @@ async fn resolve_evm_info(
             "Using external EVM network {net_name}: rpc={rpc_url} token={token_addr} vault={vault_addr}"
         );
         config.evm_network = Some(network);
-        Ok(Some(DevnetEvmInfo {
-            rpc_url,
-            wallet_private_key: String::new(),
-            payment_token_address: token_addr,
-            payment_vault_address: vault_addr,
-        }))
+        Ok(ResolvedEvm {
+            manifest: Some(DevnetEvmInfo {
+                rpc_url,
+                wallet_private_key: String::new(),
+                payment_token_address: token_addr,
+                payment_vault_address: vault_addr,
+            }),
+            local_testnet: None,
+        })
     } else if enable_evm {
         // Anvil binds — and evmlib publishes in the manifest's `rpc_url` —
         // the address in `ANVIL_IP_ADDR`, defaulting to localhost. A LAN
@@ -212,18 +340,20 @@ async fn resolve_evm_info(
         ant_node::logging::info!("Anvil blockchain running at {rpc_url}");
         ant_node::logging::info!("Funded wallet private key: {wallet_key}");
 
-        // Keep testnet alive by leaking it (it will be cleaned up on process exit)
-        // This is necessary because AnvilInstance stops Anvil when dropped
-        std::mem::forget(testnet);
-
-        Ok(Some(DevnetEvmInfo {
-            rpc_url,
-            wallet_private_key: wallet_key,
-            payment_token_address: token_addr,
-            payment_vault_address: vault_addr,
-        }))
+        Ok(ResolvedEvm {
+            manifest: Some(DevnetEvmInfo {
+                rpc_url,
+                wallet_private_key: wallet_key,
+                payment_token_address: token_addr,
+                payment_vault_address: vault_addr,
+            }),
+            local_testnet: Some(testnet),
+        })
     } else {
-        Ok(None)
+        Ok(ResolvedEvm {
+            manifest: None,
+            local_testnet: None,
+        })
     }
 }
 
@@ -235,8 +365,10 @@ fn serve_manifest_api(
     host: Option<std::net::Ipv4Addr>,
     manifest: &DevnetManifest,
     manifest_json: String,
+    browser_manifest: Option<&BrowserDevnetManifest>,
+    browser_manifest_json: Option<String>,
 ) -> color_eyre::Result<()> {
-    let host_ip = host.map_or_else(local_ip_guess, |i| i.to_string());
+    let host_ip = host.map_or_else(|| "127.0.0.1".to_string(), |i| i.to_string());
     let evm_block = manifest.evm.as_ref().map_or(serde_json::Value::Null, |e| {
         let loopback = e.rpc_url.contains("127.0.0.1") || e.rpc_url.contains("localhost");
         serde_json::json!({
@@ -255,35 +387,38 @@ fn serve_manifest_api(
         })
     });
     let bootstrap = serde_json::to_value(&manifest.bootstrap)?;
+    let browser_manifest_url =
+        browser_manifest.map(|_| format!("http://{host_ip}:{port}/api/browser-manifest.json"));
+    let public_files = browser_manifest.map_or_else(Vec::new, |browser| browser.files.clone());
     let info = serde_json::json!({
         "host_ip": host_ip,
         "manifest_url": format!("http://{host_ip}:{port}/api/devnet-manifest.json"),
+        "browser_manifest_url": browser_manifest_url,
         "node_count": manifest.node_count as u64,
         "bootstrap": bootstrap,
+        "public_files": public_files,
         "evm": evm_block,
     });
     let info_json = serde_json::to_string_pretty(&info)?;
     // Bind synchronously so a failure (e.g. the port is already in use)
     // propagates to the caller instead of the devnet silently coming up
     // without its manifest API.
-    let listener = std::net::TcpListener::bind(("0.0.0.0", port)).map_err(|e| {
-        color_eyre::eyre::eyre!("failed to bind manifest API on 0.0.0.0:{port}: {e}")
+    let bind_ip = host.map_or(std::net::Ipv4Addr::LOCALHOST, |_| {
+        std::net::Ipv4Addr::UNSPECIFIED
+    });
+    let listener = std::net::TcpListener::bind((bind_ip, port)).map_err(|e| {
+        color_eyre::eyre::eyre!("failed to bind manifest API on {bind_ip}:{port}: {e}")
     })?;
     ant_node::logging::info!(
-        "manifest API on http://0.0.0.0:{port}/api/devnet-manifest.json (+ /api/info)"
+        "manifest API on http://{host_ip}:{port}/api/devnet-manifest.json (+ /api/info)"
     );
-    spawn_manifest_server(listener, manifest_json, info_json);
+    if browser_manifest.is_some() {
+        ant_node::logging::info!(
+            "browser app manifest: http://{host_ip}:{port}/api/browser-manifest.json"
+        );
+    }
+    spawn_manifest_server(listener, manifest_json, info_json, browser_manifest_json);
     Ok(())
-}
-
-/// Best-effort primary LAN IP (src of the default route) for the info endpoint.
-fn local_ip_guess() -> String {
-    std::net::UdpSocket::bind("0.0.0.0:0")
-        .and_then(|s| {
-            s.connect("1.1.1.1:80")?;
-            Ok(s.local_addr()?.ip().to_string())
-        })
-        .unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
 /// Run a tiny read-only HTTP server on `listener` (its own thread) exposing the
@@ -297,6 +432,7 @@ fn spawn_manifest_server(
     listener: std::net::TcpListener,
     manifest_json: String,
     info_json: String,
+    browser_manifest_json: Option<String>,
 ) {
     std::thread::spawn(move || {
         use std::io::{Read, Write};
@@ -314,11 +450,19 @@ fn spawn_manifest_server(
             let (status, body) = if method == "GET" {
                 match path {
                     "/api/devnet-manifest.json" => ("200 OK", manifest_json.as_str()),
+                    "/api/browser-manifest.json" => browser_manifest_json.as_deref().map_or(
+                        (
+                            "404 Not Found",
+                            "{\"error\":\"browser manifest not enabled\"}",
+                        ),
+                        |body| ("200 OK", body),
+                    ),
                     "/api/info" => ("200 OK", info_json.as_str()),
                     "" | "/api" => (
                         "200 OK",
                         "{\"service\":\"ant-devnet manifest API\",\
-                         \"endpoints\":[\"/api/devnet-manifest.json\",\"/api/info\"]}",
+                         \"endpoints\":[\"/api/devnet-manifest.json\",\
+                         \"/api/browser-manifest.json\",\"/api/info\"]}",
                     ),
                     _ => ("404 Not Found", "{\"error\":\"not found\"}"),
                 }

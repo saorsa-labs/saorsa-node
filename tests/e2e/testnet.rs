@@ -1522,7 +1522,7 @@ impl TestNetwork {
     /// Returns an error if any node's bootstrap does not complete within
     /// the timeout.
     async fn wait_for_replication_bootstrap(&self) -> Result<()> {
-        const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(120);
+        const BOOTSTRAP_TIMEOUT: Duration = Duration::from_mins(2);
 
         for node in &self.nodes {
             if let Some(ref engine) = node.replication_engine {
@@ -1719,7 +1719,7 @@ impl TestNetwork {
     /// Returns an error if node creation, startup, or bootstrap fails.
     pub async fn add_node(&mut self) -> Result<usize> {
         const DHT_WARMUP_QUERIES: usize = 10;
-        const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(120);
+        const BOOTSTRAP_TIMEOUT: Duration = Duration::from_mins(2);
 
         let index = self.nodes.len();
 

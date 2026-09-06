@@ -179,7 +179,7 @@ mod tests {
         let delay = rollout.calculate_delay();
 
         // Should be between 0 and 24 hours
-        assert!(delay <= Duration::from_secs(24 * 3600));
+        assert!(delay <= Duration::from_hours(24));
         assert!(rollout.is_enabled());
     }
 
@@ -254,7 +254,7 @@ mod tests {
         let rollout = StagedRollout::new(&large_id, 24);
         let delay = rollout.calculate_delay();
 
-        assert!(delay <= Duration::from_secs(24 * 3600));
+        assert!(delay <= Duration::from_hours(24));
     }
 
     /// Test 9: Empty node ID handled
@@ -264,7 +264,7 @@ mod tests {
         let delay = rollout.calculate_delay();
 
         // Should still produce a valid delay
-        assert!(delay <= Duration::from_secs(24 * 3600));
+        assert!(delay <= Duration::from_hours(24));
     }
 
     /// Test 10: Distribution test - ensure delays are spread across window

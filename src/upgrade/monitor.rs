@@ -296,7 +296,7 @@ impl UpgradeMonitor {
         let is_new_version = self
             .pending_upgrade_version
             .as_ref()
-            .map_or(true, |v| *v != info.version);
+            .is_none_or(|v| *v != info.version);
 
         if is_new_version {
             // New version detected - start rollout timer
@@ -564,9 +564,7 @@ fn select_upgrade_from_releases(
             release_notes: release.body.clone(),
         };
 
-        let should_replace = best
-            .as_ref()
-            .map_or(true, |b| candidate.version > b.version);
+        let should_replace = best.as_ref().is_none_or(|b| candidate.version > b.version);
 
         if should_replace {
             best = Some(candidate);
@@ -894,10 +892,10 @@ mod tests {
     #[test]
     fn test_check_interval() {
         let monitor = UpgradeMonitor::new("test/repo".to_string(), UpgradeChannel::Stable, 24);
-        assert_eq!(monitor.check_interval(), Duration::from_secs(24 * 3600));
+        assert_eq!(monitor.check_interval(), Duration::from_hours(24));
 
         let monitor2 = UpgradeMonitor::new("test/repo".to_string(), UpgradeChannel::Stable, 6);
-        assert_eq!(monitor2.check_interval(), Duration::from_secs(6 * 3600));
+        assert_eq!(monitor2.check_interval(), Duration::from_hours(6));
     }
 
     /// Test 11: Process release - upgrade available

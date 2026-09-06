@@ -153,7 +153,7 @@ fn sqrt_floor(key_count: u32) -> u32 {
     let mut y = x.div_ceil(2);
     while y < x {
         x = y;
-        y = (x + n / x) / 2;
+        y = u64::midpoint(x, n / x);
     }
     // x == floor(sqrt(n)) here.
     let ceil = if x.saturating_mul(x) == n { x } else { x + 1 };

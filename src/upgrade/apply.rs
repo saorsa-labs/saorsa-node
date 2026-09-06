@@ -52,7 +52,7 @@ impl AutoApplyUpgrader {
             current_version,
             client: reqwest::Client::builder()
                 .user_agent(concat!("ant-node/", env!("CARGO_PKG_VERSION")))
-                .timeout(std::time::Duration::from_secs(300))
+                .timeout(std::time::Duration::from_mins(5))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             binary_cache: None,

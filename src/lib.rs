@@ -43,6 +43,7 @@
 #![cfg_attr(not(feature = "logging"), allow(unused_variables, unused_assignments))]
 
 pub mod ant_protocol;
+pub mod browser;
 pub mod client;
 pub mod config;
 pub mod devnet;
@@ -54,17 +55,23 @@ pub mod payment;
 pub mod replication;
 pub mod storage;
 pub mod upgrade;
+#[cfg(feature = "webrtc-direct")]
+mod web_rtc;
 
 pub use ant_protocol::{
     ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
     ChunkPutResponse, ChunkQuoteRequest, ChunkQuoteResponse, CHUNK_PROTOCOL_ID,
     CLOSE_GROUP_MAJORITY, CLOSE_GROUP_SIZE, MAX_CHUNK_SIZE,
 };
+pub use browser::{
+    BrowserBootstrapNode, BrowserChunkInfo, BrowserDevnetManifest, BrowserEndpoint,
+    BrowserPaymentNetwork, BrowserPublicFile, WebRtcDirectEndpoint, BROWSER_MANIFEST_VERSION,
+};
 pub use client::{
     compute_address, hex_node_id_to_encoded_peer_id, peer_id_to_xor_name, xor_distance, DataChunk,
     XorName,
 };
-pub use config::{NodeConfig, StorageConfig};
+pub use config::{NodeConfig, StorageConfig, WebRtcDirectConfig};
 pub use devnet::{Devnet, DevnetConfig, DevnetEvmInfo, DevnetManifest};
 pub use error::{Error, Result};
 pub use event::{NodeEvent, NodeEventsChannel};
@@ -79,6 +86,6 @@ pub mod core {
     pub use saorsa_core::identity::{NodeIdentity, PeerId};
     pub use saorsa_core::{
         IPDiversityConfig, MlDsa65, MultiAddr, NodeConfig as CoreNodeConfig, NodeMode, P2PEvent,
-        P2PNode,
+        P2PNode, WebRtcCertificateHash, WebRtcDirectAddr,
     };
 }

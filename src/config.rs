@@ -120,6 +120,13 @@ pub struct NodeConfig {
     #[serde(default)]
     pub storage: StorageConfig,
 
+    /// Direct-browser WebRTC Direct listener.
+    ///
+    /// This is enabled automatically when the binary includes the default
+    /// `webrtc-direct` feature. Minimal native-only builds leave it disabled.
+    #[serde(default)]
+    pub webrtc_direct: WebRtcDirectConfig,
+
     /// Directory for persisting the close group cache.
     ///
     /// When `None` (default), the node's `root_dir` is used — the cache
@@ -141,6 +148,163 @@ pub struct NodeConfig {
     /// Log level.
     #[serde(default = "default_log_level")]
     pub log_level: String,
+}
+
+/// Configuration for the ADR-0009 WebRTC Direct proof of concept.
+///
+/// This listener is deliberately separate from the native Saorsa QUIC port.
+/// It exposes local closest-node lookup, immutable chunk reads, and paid
+/// content-addressed writes through the ordinary payment verifier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebRtcDirectConfig {
+    /// Enable the browser listener.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// UDP address for the WebRTC Direct listener.
+    #[serde(default = "default_webrtc_direct_bind")]
+    pub bind: SocketAddr,
+
+    /// Literal public UDP address advertised to browsers.
+    ///
+    /// When omitted, a wildcard listener uses the native transport's observed
+    /// external IP (or the host's routed IP) and an automatically assigned,
+    /// stable high UDP port.
+    #[serde(default)]
+    pub advertised_addr: Option<SocketAddr>,
+
+    /// PEM file used to persist the stable DTLS certificate and private key.
+    ///
+    /// Relative paths are resolved against the node root directory by the
+    /// caller. The default is `webrtc-direct.pem` beside the node identity.
+    #[serde(default)]
+    pub certificate_path: Option<PathBuf>,
+
+    /// Maximum simultaneously accepted browser sessions.
+    #[serde(default = "default_webrtc_direct_max_connections")]
+    pub max_connections: usize,
+
+    /// Maximum simultaneously accepted browser sessions from one source IP.
+    ///
+    /// This must be lower than [`Self::max_connections`] so one public source
+    /// cannot occupy every listener slot.
+    #[serde(default = "default_webrtc_direct_max_connections_per_ip")]
+    pub max_connections_per_ip: usize,
+
+    /// Maximum simultaneously active `DataChannels` on one browser session.
+    #[serde(default = "default_webrtc_direct_max_channels_per_connection")]
+    pub max_channels_per_connection: usize,
+
+    /// Maximum simultaneously active `DataChannels` across the listener.
+    ///
+    /// Every admitted channel owns one handler task, so this is also the hard
+    /// global channel-task bound.
+    #[serde(default = "default_webrtc_direct_max_channels")]
+    pub max_channels: usize,
+
+    /// Maximum requests being read or processed across the listener.
+    #[serde(default = "default_webrtc_direct_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+
+    /// Token-bucket request rate across the listener, in requests per second.
+    #[serde(default = "default_webrtc_direct_max_requests_per_second")]
+    pub max_requests_per_second: usize,
+
+    /// Token-bucket request rate for one source IP, in requests per second.
+    #[serde(default = "default_webrtc_direct_max_requests_per_second_per_ip")]
+    pub max_requests_per_second_per_ip: usize,
+
+    /// Token-bucket request rate for one browser session, in requests per
+    /// second.
+    #[serde(default = "default_webrtc_direct_max_requests_per_second_per_connection")]
+    pub max_requests_per_second_per_connection: usize,
+
+    /// Maximum bytes reserved by frames being assembled, decrypted, or sent
+    /// across the listener.
+    #[serde(default = "default_webrtc_direct_max_in_flight_bytes")]
+    pub max_in_flight_bytes: usize,
+
+    /// Maximum in-flight frame bytes attributable to one source IP.
+    #[serde(default = "default_webrtc_direct_max_in_flight_bytes_per_ip")]
+    pub max_in_flight_bytes_per_ip: usize,
+
+    /// Maximum JSON request-header size, in bytes.
+    ///
+    /// Binary PUT content has a separate [`crate::ant_protocol::MAX_CHUNK_SIZE`]
+    /// limit and is never JSON/base64 encoded.
+    #[serde(default = "default_webrtc_direct_max_request_bytes")]
+    pub max_request_bytes: usize,
+}
+
+impl Default for WebRtcDirectConfig {
+    fn default() -> Self {
+        Self {
+            enabled: cfg!(feature = "webrtc-direct"),
+            bind: default_webrtc_direct_bind(),
+            advertised_addr: None,
+            certificate_path: None,
+            max_connections: default_webrtc_direct_max_connections(),
+            max_connections_per_ip: default_webrtc_direct_max_connections_per_ip(),
+            max_channels_per_connection: default_webrtc_direct_max_channels_per_connection(),
+            max_channels: default_webrtc_direct_max_channels(),
+            max_concurrent_requests: default_webrtc_direct_max_concurrent_requests(),
+            max_requests_per_second: default_webrtc_direct_max_requests_per_second(),
+            max_requests_per_second_per_ip: default_webrtc_direct_max_requests_per_second_per_ip(),
+            max_requests_per_second_per_connection:
+                default_webrtc_direct_max_requests_per_second_per_connection(),
+            max_in_flight_bytes: default_webrtc_direct_max_in_flight_bytes(),
+            max_in_flight_bytes_per_ip: default_webrtc_direct_max_in_flight_bytes_per_ip(),
+            max_request_bytes: default_webrtc_direct_max_request_bytes(),
+        }
+    }
+}
+
+fn default_webrtc_direct_bind() -> SocketAddr {
+    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+}
+
+const fn default_webrtc_direct_max_connections() -> usize {
+    32
+}
+
+const fn default_webrtc_direct_max_connections_per_ip() -> usize {
+    4
+}
+
+const fn default_webrtc_direct_max_channels_per_connection() -> usize {
+    2
+}
+
+const fn default_webrtc_direct_max_channels() -> usize {
+    32
+}
+
+const fn default_webrtc_direct_max_concurrent_requests() -> usize {
+    16
+}
+
+const fn default_webrtc_direct_max_requests_per_second() -> usize {
+    256
+}
+
+const fn default_webrtc_direct_max_requests_per_second_per_ip() -> usize {
+    32
+}
+
+const fn default_webrtc_direct_max_requests_per_second_per_connection() -> usize {
+    16
+}
+
+const fn default_webrtc_direct_max_in_flight_bytes() -> usize {
+    64 * 1024 * 1024
+}
+
+const fn default_webrtc_direct_max_in_flight_bytes_per_ip() -> usize {
+    16 * 1024 * 1024
+}
+
+const fn default_webrtc_direct_max_request_bytes() -> usize {
+    64 * 1024
 }
 
 /// Auto-upgrade configuration.
@@ -279,6 +443,7 @@ impl Default for NodeConfig {
             upgrade: UpgradeConfig::default(),
             payment: PaymentConfig::default(),
             storage: StorageConfig::default(),
+            webrtc_direct: WebRtcDirectConfig::default(),
             close_group_cache_dir: None,
             max_message_size: default_max_message_size(),
             log_level: default_log_level(),
@@ -605,6 +770,13 @@ mod tests {
     fn test_default_config_has_cache_capacity() {
         let config = PaymentConfig::default();
         assert!(config.cache_capacity > 0, "Cache capacity must be positive");
+    }
+
+    #[test]
+    fn default_webrtc_listener_tracks_compile_time_feature() {
+        let config = WebRtcDirectConfig::default();
+        assert_eq!(config.enabled, cfg!(feature = "webrtc-direct"));
+        assert_eq!(config.bind, "0.0.0.0:0".parse().expect("wildcard bind"));
     }
 
     #[test]

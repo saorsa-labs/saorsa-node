@@ -90,7 +90,7 @@ async fn test_custom_network_config() {
         node_count: 7,
         bootstrap_count: 2,
         spawn_delay: Duration::from_millis(100),
-        stabilization_timeout: Duration::from_secs(60),
+        stabilization_timeout: Duration::from_mins(1),
         ..Default::default()
     };
 

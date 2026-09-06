@@ -281,7 +281,7 @@ async fn first_audit_drainer_launches_and_passes_remote_monetized_pin() {
         })
         .expect("drainer alive");
 
-    let stats = wait_for_first_audit_stats(b_engine, Duration::from_secs(120), |s| {
+    let stats = wait_for_first_audit_stats(b_engine, Duration::from_mins(2), |s| {
         s.passed >= 1 || s.timed_out >= 1 || s.failed >= 1
     })
     .await;

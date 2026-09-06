@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn test_write_read_roundtrip() {
         let tmp = TempDir::new().unwrap();
-        let cache = ReleaseCache::new(tmp.path().to_path_buf(), Duration::from_secs(300));
+        let cache = ReleaseCache::new(tmp.path().to_path_buf(), Duration::from_mins(5));
 
         cache.write("owner/repo", &sample_releases()).unwrap();
 
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn test_wrong_repo_returns_none() {
         let tmp = TempDir::new().unwrap();
-        let cache = ReleaseCache::new(tmp.path().to_path_buf(), Duration::from_secs(300));
+        let cache = ReleaseCache::new(tmp.path().to_path_buf(), Duration::from_mins(5));
 
         cache.write("owner/repo", &sample_releases()).unwrap();
 
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn test_corrupted_file_returns_none() {
         let tmp = TempDir::new().unwrap();
-        let cache = ReleaseCache::new(tmp.path().to_path_buf(), Duration::from_secs(300));
+        let cache = ReleaseCache::new(tmp.path().to_path_buf(), Duration::from_mins(5));
 
         fs::write(cache.cache_file(), "not valid json!!!").unwrap();
 
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn test_missing_file_returns_none() {
         let tmp = TempDir::new().unwrap();
-        let cache = ReleaseCache::new(tmp.path().to_path_buf(), Duration::from_secs(300));
+        let cache = ReleaseCache::new(tmp.path().to_path_buf(), Duration::from_mins(5));
 
         assert!(cache.read_if_valid("owner/repo").is_none());
     }

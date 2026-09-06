@@ -2413,7 +2413,7 @@ mod tests {
         let key = xor_name_from_byte(0x01);
         queues.add_pending_verify(key, test_entry(1));
 
-        let evicted = queues.evict_stale(Duration::from_secs(3600));
+        let evicted = queues.evict_stale(Duration::from_hours(1));
         assert!(
             evicted.is_empty(),
             "fresh entry should not be reported as evicted"
