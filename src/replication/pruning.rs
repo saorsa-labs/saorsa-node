@@ -73,7 +73,7 @@ use crate::replication::types::{
     BootstrapClaimObservation, KeyVerificationEvidence, NeighborSyncState, PaidListEvidence,
     RepairProofs,
 };
-use crate::storage::LmdbStorage;
+use crate::storage::ChunkStore;
 
 // `RepairProofs` remains in the prune-pass context only so records deleted by
 // pruning also drop their (audit-path) repair-proof entries; it plays no part
@@ -136,7 +136,7 @@ pub struct PrunePassContext<'a> {
     /// Local peer id.
     pub self_id: &'a PeerId,
     /// Local record storage.
-    pub storage: &'a Arc<LmdbStorage>,
+    pub storage: &'a Arc<ChunkStore>,
     /// Persistent paid-list state.
     pub paid_list: &'a Arc<PaidList>,
     /// P2P node used for routing lookups and prune-confirmation audits.
@@ -341,7 +341,7 @@ struct PruneAuditReportState {
 
 #[derive(Clone, Copy)]
 struct PruneAuditContext<'a> {
-    storage: &'a Arc<LmdbStorage>,
+    storage: &'a Arc<ChunkStore>,
     p2p_node: &'a Arc<P2PNode>,
     config: &'a ReplicationConfig,
     sync_state: &'a Arc<RwLock<NeighborSyncState>>,
@@ -1168,7 +1168,7 @@ async fn advance_prune_cursor(
 
 async fn delete_stored_records(
     keys_to_delete: &[XorName],
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     paid_list: &Arc<PaidList>,
     repair_proofs: &Arc<RwLock<RepairProofs>>,
 ) -> usize {
@@ -1205,7 +1205,7 @@ async fn delete_stored_records(
 async fn collect_record_prune_proofs(
     candidates: &[RecordPruneCandidate],
     local_stored_key_count: usize,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     p2p_node: &Arc<P2PNode>,
     config: &ReplicationConfig,
     sync_state: &Arc<RwLock<NeighborSyncState>>,
@@ -1289,7 +1289,7 @@ async fn revalidated_fast_prune_keys(
     (keys_to_delete, cleared)
 }
 
-async fn stored_record_still_exists(key: &XorName, storage: &Arc<LmdbStorage>) -> bool {
+async fn stored_record_still_exists(key: &XorName, storage: &Arc<ChunkStore>) -> bool {
     match storage.get_raw(key).await {
         Ok(Some(_)) => true,
         Ok(None) => false,
@@ -1501,7 +1501,7 @@ fn confirmed_keys_from_presence(
 /// from vetoing deletion forever without accepting under-replication.
 /// Groups of one or two peers require every proof: tolerating a miss there
 /// would allow deletion on a single attestation.
-fn prune_proofs_needed(group_size: usize) -> usize {
+pub(crate) fn prune_proofs_needed(group_size: usize) -> usize {
     if group_size <= 2 {
         group_size
     } else {
@@ -1513,7 +1513,7 @@ fn prune_proofs_needed(group_size: usize) -> usize {
 ///
 /// `proofs_needed == 0` means confirmation is impossible (no targets), not
 /// trivially met.
-fn target_peers_reported_present(
+pub(crate) fn target_peers_reported_present(
     key: &XorName,
     target_peers: &[PeerId],
     present_by_key: &HashMap<XorName, HashSet<PeerId>>,
@@ -1915,14 +1915,14 @@ async fn local_record_digest(
     peer: &PeerId,
     key: &XorName,
     nonce: &[u8; 32],
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
 ) -> Option<[u8; 32]> {
     local_record_bytes(key, storage)
         .await
         .map(|bytes| compute_audit_digest(nonce, peer.as_bytes(), key, &bytes))
 }
 
-async fn local_record_bytes(key: &XorName, storage: &Arc<LmdbStorage>) -> Option<Vec<u8>> {
+async fn local_record_bytes(key: &XorName, storage: &Arc<ChunkStore>) -> Option<Vec<u8>> {
     match storage.get_raw(key).await {
         Ok(Some(bytes)) => Some(bytes),
         Ok(None) => {

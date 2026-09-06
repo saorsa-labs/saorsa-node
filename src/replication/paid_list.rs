@@ -60,7 +60,7 @@ pub struct PaidList {
     paid_prune_cursor: RwLock<usize>,
     /// Tracks every paid-list LMDB blocking task.
     ///
-    /// Same rationale as `LmdbStorage::blocking_tracker`: a `spawn_blocking`
+    /// Same rationale as `ChunkStore::blocking_tracker`: a `spawn_blocking`
     /// closure owns a cloned [`Env`] and keeps running when its async awaiter
     /// is dropped, so [`Self::wait_idle`] waits on the blocking tasks
     /// themselves before the environment may be reopened.

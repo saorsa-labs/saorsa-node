@@ -6,7 +6,7 @@
 //! `poc_commitment_audit_attacks`. This file fills the remaining gap: the
 //! *live* responder control-flow branches in
 //! [`ant_node::replication::storage_commitment_audit::handle_subtree_challenge`] — the function the
-//! network actually calls — driven against a real `LmdbStorage` and a real
+//! network actually calls — driven against a real `ChunkStore` and a real
 //! `ResponderCommitmentState`, asserting on the exact `SubtreeAuditResponse`
 //! variant produced.
 //!
@@ -40,7 +40,7 @@ use ant_node::replication::storage_commitment_audit::{
     handle_subtree_challenge, handle_subtree_challenge_measured, handle_subtree_slice_challenge,
 };
 use ant_node::replication::subtree::{verify_subtree_proof, StructureVerdict};
-use ant_node::storage::{LmdbStorage, LmdbStorageConfig};
+use ant_node::storage::{ChunkStore, ChunkStoreConfig};
 use saorsa_core::identity::PeerId;
 use saorsa_pqc::api::sig::{ml_dsa_65, MlDsaPublicKey, MlDsaSecretKey};
 use tempfile::TempDir;
@@ -49,13 +49,13 @@ use tempfile::TempDir;
 // Fixtures
 // ---------------------------------------------------------------------------
 
-async fn test_storage() -> (LmdbStorage, TempDir) {
+async fn test_storage() -> (ChunkStore, TempDir) {
     let temp_dir = TempDir::new().expect("create temp dir");
-    let config = LmdbStorageConfig {
+    let config = ChunkStoreConfig {
         root_dir: temp_dir.path().to_path_buf(),
-        ..LmdbStorageConfig::test_default()
+        ..ChunkStoreConfig::test_default()
     };
-    let storage = LmdbStorage::new(config).await.expect("create storage");
+    let storage = ChunkStore::new(config).await.expect("create storage");
     (storage, temp_dir)
 }
 
@@ -81,7 +81,7 @@ impl Responder {
     /// Build a responder that has stored `indices` and committed to them.
     /// The committed leaf binds `(address, BLAKE3(content))`; the responder
     /// reads bytes by address at audit time and rehashes them.
-    async fn new(storage: &LmdbStorage, indices: &[u8]) -> Self {
+    async fn new(storage: &ChunkStore, indices: &[u8]) -> Self {
         let (pk, sk) = keypair();
         // Production identity derivation: peer_id == BLAKE3(pubkey_bytes).
         let peer_id_bytes = *blake3::hash(&pk.to_bytes()).as_bytes();
@@ -90,7 +90,7 @@ impl Responder {
         let mut entries = Vec::new();
         for &i in indices {
             let content = chunk_content(i);
-            let addr = LmdbStorage::compute_address(&content);
+            let addr = ChunkStore::compute_address(&content);
             storage.put(&addr, &content).await.expect("put chunk");
             let bytes_hash = *blake3::hash(&content).as_bytes();
             entries.push((addr, bytes_hash));
@@ -112,7 +112,7 @@ impl Responder {
     }
 
     fn address(i: u8) -> [u8; 32] {
-        LmdbStorage::compute_address(&chunk_content(i))
+        ChunkStore::compute_address(&chunk_content(i))
     }
 }
 
@@ -360,7 +360,7 @@ async fn committed_key_with_missing_bytes_is_rejected() {
 /// A successful proof reports what it read and hashed, at a floor per leaf.
 /// Anchors the rejection case below: it fixes what the measurement means.
 ///
-/// A leaf costs more than its bytes — an LMDB lookup and a blocking-task round
+/// A leaf costs more than its bytes — a store lookup and a blocking-task round
 /// trip are owed whatever its size — and nothing bounds a chunk from below, so
 /// the charge is `max(content, floor)` per leaf. These test records are 1 KiB,
 /// well under the floor, which is the case that used to be nearly free: the
@@ -739,7 +739,7 @@ async fn slice_challenge_opens_a_deep_block_of_a_large_chunk() {
     let content: Vec<u8> = (0..100_000u32)
         .map(|n| (n.wrapping_mul(2_654_435_761) >> 13) as u8)
         .collect();
-    let addr = LmdbStorage::compute_address(&content);
+    let addr = ChunkStore::compute_address(&content);
     storage.put(&addr, &content).await.expect("put chunk");
     let bytes_hash = *blake3::hash(&content).as_bytes();
 

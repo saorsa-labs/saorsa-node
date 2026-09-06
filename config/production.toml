@@ -46,9 +46,6 @@ enabled = true
 # Verify content hash on read
 verify_on_read = true
 
-# Maximum LMDB database size in GiB (0 = default 32 GiB)
-db_size_gb = 0
-
 # --- Upgrade ---
 [upgrade]
 enabled = false

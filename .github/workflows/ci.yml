@@ -50,6 +50,24 @@ jobs:
           version: ${{ env.FOUNDRY_VERSION }}
       - name: Run unit tests
         run: cargo test --lib --features test-utils
+      - name: Kill a node mid-write and check what survived
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --test chunk_store_crash_safety --features test-utils -- --test-threads=1 2>&1 | tee /tmp/crash_safety.log
+          grep -qE 'test result: ok\. [1-9]' /tmp/crash_safety.log \
+            || { echo 'chunk_store_crash_safety ran no tests'; exit 1; }
+      - name: Startup scan, index memory and inode cost at scale
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --test storage_scale --features test-utils -- --nocapture --test-threads=1 2>&1 | tee /tmp/scale.log
+          # A target whose required features are not passed is skipped with a
+          # warning and a zero exit, so a harness can stop running without anyone
+          # noticing. This is what makes that loud.
+          grep -qE 'test result: ok\. [1-9]' /tmp/scale.log \
+            || { echo 'scale ran no tests'; exit 1; }
       - name: Run e2e tests
         run: cargo test --test e2e --features test-utils -- --test-threads=1
       - name: Run v12 storage-bound audit attack PoCs
@@ -58,6 +76,54 @@ jobs:
         run: cargo test --test poc_audit_handler_live --features test-utils
       - name: Run bootstrap-stall PoC regression marker
         run: cargo test --test poc_bootstrap_stall --features test-utils
+
+  filesystems:
+    name: Storage on ${{ matrix.fs }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fs: [ext4, xfs, btrfs]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the filesystem tools
+        run: sudo apt-get update && sudo apt-get install -y xfsprogs btrfs-progs
+      - name: Make a ${{ matrix.fs }} volume and mount it
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A loopback image, so these run on a filesystem of the right kind rather than
+          # on whatever the runner happens to give us. ext4 is what most of the fleet is
+          # on; XFS and btrfs are the two the design reasons about separately, btrfs
+          # because it has been observed reordering writes around a rename.
+          # 3 GiB is ample: these tests use tens of MiB.
+          truncate -s 3G /tmp/${{ matrix.fs }}.img
+          mkfs.${{ matrix.fs }} -q /tmp/${{ matrix.fs }}.img
+          sudo mkdir -p /mnt/antfs
+          sudo mount -o loop /tmp/${{ matrix.fs }}.img /mnt/antfs
+          sudo chown "$USER" /mnt/antfs
+          df -hT /mnt/antfs
+      # TMPDIR is what `TempDir::new` uses, so this puts every temporary store these tests
+      # build on the mounted filesystem rather than on the runner's root.
+      #
+      # These used to be the migration harnesses. The migration is gone, and what is left
+      # worth asking of a filesystem is what the store itself does on it: publish a chunk
+      # through a temporary and a rename, flush the directory, unlink it again, and rebuild
+      # an index from the names afterwards. The storage tests do all of that, and running
+      # them here is what keeps ext4, XFS and btrfs covered now that the harnesses that used
+      # to cover them have been deleted. They do not measure free space before and after;
+      # the harness that did was about the migration and went with it.
+      - name: Storage behaviour on ${{ matrix.fs }}
+        env:
+          TMPDIR: /mnt/antfs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --lib --features test-utils storage:: 2>&1 | tee /tmp/storage.log
+          grep -qE 'test result: ok\. [1-9]' /tmp/storage.log \
+            || { echo 'the storage tests ran nothing'; exit 1; }
 
   doc:
     name: Documentation
@@ -84,6 +150,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build release (no logging)
         run: cargo build --release --no-default-features
+      # The crash harness drives the store through a failpoint that parks the process
+      # forever on an environment variable, and the store's own tests use the same one. It
+      # is compiled only under `test-utils`, which
+      # is not a default feature and is not passed by the release workflow, so a shipped
+      # binary does not contain it. This proves that rather than trusting it: the variable
+      # name is a string literal, so it survives into the binary whenever the code that
+      # reads it is compiled, and its absence is the absence of the failpoint.
+      - name: A shipped binary carries no failpoint
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --bin ant-node
+          found=$(strings -a target/debug/ant-node | grep -c 'ANT_HALT_' || true)
+          # With --features test-utils this count is not zero, which is what makes a zero
+          # here evidence rather than an accident of how the binary was stripped. The exact
+          # number is one per failpoint and is deliberately not asserted, so that adding a
+          # failpoint does not fail this check.
+          if [ "$found" != "0" ]; then
+            echo "the publish failpoint is compiled into a default-feature build"
+            exit 1
+          fi
+          echo "no failpoint in a default-feature build"
 
   test-no-logging:
     name: Test (no logging)

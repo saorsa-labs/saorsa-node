@@ -41,7 +41,7 @@ use crate::replication::protocol::{
     ReplicationMessageBody, ABSENT_KEY_DIGEST,
 };
 use crate::replication::types::{BootstrapClaimObservation, NeighborSyncState};
-use crate::storage::LmdbStorage;
+use crate::storage::ChunkStore;
 
 use super::REPLICATION_TRUST_WEIGHT;
 
@@ -137,7 +137,7 @@ pub(crate) async fn run_possession_check(
     key: XorName,
     peers: Vec<PeerId>,
     p2p_node: &Arc<P2PNode>,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     config: &ReplicationConfig,
     sync_state: &Arc<RwLock<NeighborSyncState>>,
     audit_challenge_coordinator: &Arc<AuditChallengeCoordinator>,

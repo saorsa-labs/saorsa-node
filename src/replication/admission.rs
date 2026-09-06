@@ -17,7 +17,7 @@ use saorsa_core::P2PNode;
 use crate::ant_protocol::XorName;
 use crate::replication::config::ReplicationConfig;
 use crate::replication::paid_list::PaidList;
-use crate::storage::LmdbStorage;
+use crate::storage::ChunkStore;
 
 /// Result of admitting a set of hints from a neighbor sync.
 #[derive(Debug)]
@@ -82,7 +82,7 @@ async fn is_relevant(
     key: &XorName,
     p2p_node: &Arc<P2PNode>,
     config: &ReplicationConfig,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     paid_list: &Arc<PaidList>,
     pending_keys: &HashSet<XorName>,
 ) -> bool {
@@ -113,7 +113,7 @@ pub async fn admit_hints(
     paid_hints: &[XorName],
     p2p_node: &Arc<P2PNode>,
     config: &ReplicationConfig,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     paid_list: &Arc<PaidList>,
     pending_keys: &HashSet<XorName>,
 ) -> AdmissionResult {
@@ -202,7 +202,7 @@ mod tests {
     // -----------------------------------------------------------------------
     // AdmissionResult construction helpers for pure-logic tests
     //
-    // The full `admit_hints` function requires a live DHT + LMDB backend.
+    // The full `admit_hints` function requires a live DHT and chunk store.
     // For unit tests we directly exercise:
     //   1. Cross-set precedence logic
     //   2. Deduplication logic

@@ -13,7 +13,7 @@ use crate::payment::proof::{
 };
 use crate::replication::commitment::MAX_COMMITMENT_KEY_COUNT;
 use crate::replication::config::K_BUCKET_SIZE;
-use crate::storage::lmdb::LmdbStorage;
+use crate::storage::ChunkStore;
 use ant_protocol::payment::verify::{verify_quote_content, verify_quote_signature};
 use evmlib::common::{Amount, QuoteHash};
 use evmlib::contract::payment_vault;
@@ -605,7 +605,7 @@ pub struct PaymentVerifier {
     /// midpoint in the live DHT. `None` in unit tests that don't exercise
     /// live-DHT checks; production startup MUST call [`attach_p2p_node`].
     p2p_node: RwLock<Option<Arc<P2PNode>>>,
-    /// LMDB storage handle, attached post-construction. Retained for
+    /// Chunk store handle, attached post-construction. Retained for
     /// store-backed verifier checks that need the authoritative on-disk record
     /// count without depending on a side counter that may drift from
     /// replication/repair/prune paths. NOTE: the ADR-0006 price floor does NOT
@@ -614,7 +614,7 @@ pub struct PaymentVerifier {
     /// compared unlike counts and false-rejected honest quotes). `None` in unit
     /// tests that don't exercise store-backed checks; production wires it via
     /// [`Self::attach_storage`].
-    storage: RwLock<Option<Arc<LmdbStorage>>>,
+    storage: RwLock<Option<Arc<ChunkStore>>>,
     /// Test-only override for the paid-quote issuer K-closest check.
     ///
     /// Production code derives closest peers from the attached [`P2PNode`].
@@ -878,7 +878,7 @@ impl PaymentVerifier {
         self.config.close_group_size
     }
 
-    /// Attach the node's [`LmdbStorage`] handle for store-backed verifier
+    /// Attach the node's [`ChunkStore`] handle for store-backed verifier
     /// checks that read the authoritative on-disk record count.
     ///
     /// NOTE: the ADR-0006 price floor does NOT depend on this handle — it is
@@ -888,9 +888,9 @@ impl PaymentVerifier {
     /// attached still admits PUTs; this
     /// attachment only feeds any current/future store-count-backed checks.
     /// Idempotent: calling twice replaces the handle.
-    pub fn attach_storage(&self, storage: Arc<LmdbStorage>) {
+    pub fn attach_storage(&self, storage: Arc<ChunkStore>) {
         *self.storage.write() = Some(storage);
-        debug!("PaymentVerifier: LmdbStorage attached for paid-quote price-floor checks");
+        debug!("PaymentVerifier: ChunkStore attached for paid-quote price-floor checks");
     }
 
     /// Attach the live commitment source for the price floor: the SAME

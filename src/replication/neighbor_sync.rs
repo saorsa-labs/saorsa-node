@@ -19,7 +19,7 @@ use crate::replication::protocol::{
     NeighborSyncRequest, NeighborSyncResponse, ReplicationMessage, ReplicationMessageBody,
 };
 use crate::replication::types::NeighborSyncState;
-use crate::storage::LmdbStorage;
+use crate::storage::ChunkStore;
 
 /// Hint-build duration that is worth surfacing at info level.
 const HINT_BUILD_SLOW_LOG_MS: u128 = 250;
@@ -64,7 +64,7 @@ pub(crate) struct PeerSyncHints {
 /// this node is allowed to delete them.
 pub async fn build_replica_hints_for_peer(
     peer: &PeerId,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     p2p_node: &Arc<P2PNode>,
     close_group_size: usize,
 ) -> Vec<XorName> {
@@ -77,7 +77,7 @@ pub async fn build_replica_hints_for_peer(
 
 pub(crate) async fn build_replica_hints_for_peer_with_close_groups(
     peer: &PeerId,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     p2p_node: &Arc<P2PNode>,
     close_group_size: usize,
 ) -> Vec<SentReplicaHint> {
@@ -107,7 +107,7 @@ pub(crate) async fn build_replica_hints_for_peer_with_close_groups(
 /// storage and one scan over the paid list.
 pub(crate) async fn build_sync_hints_for_peers(
     peers: &[PeerId],
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     paid_list: &Arc<PaidList>,
     p2p_node: &Arc<P2PNode>,
     close_group_size: usize,
@@ -330,7 +330,7 @@ fn peer_on_cooldown(
 pub async fn sync_with_peer(
     peer: &PeerId,
     p2p_node: &Arc<P2PNode>,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     paid_list: &Arc<PaidList>,
     config: &ReplicationConfig,
     is_bootstrapping: bool,
@@ -355,7 +355,7 @@ pub async fn sync_with_peer(
 pub(crate) async fn sync_with_peer_with_outcome(
     peer: &PeerId,
     p2p_node: &Arc<P2PNode>,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     paid_list: &Arc<PaidList>,
     config: &ReplicationConfig,
     is_bootstrapping: bool,
@@ -485,7 +485,7 @@ pub async fn handle_sync_request(
     sender: &PeerId,
     request: &NeighborSyncRequest,
     p2p_node: &Arc<P2PNode>,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     paid_list: &Arc<PaidList>,
     config: &ReplicationConfig,
     is_bootstrapping: bool,
@@ -509,7 +509,7 @@ pub(crate) async fn handle_sync_request_with_proofs(
     sender: &PeerId,
     _request: &NeighborSyncRequest,
     p2p_node: &Arc<P2PNode>,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     paid_list: &Arc<PaidList>,
     config: &ReplicationConfig,
     is_bootstrapping: bool,

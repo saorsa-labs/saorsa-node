@@ -16,14 +16,14 @@
 //! counter; the probe scenario is observed through a sender-side count of
 //! verification requests, since a request that was never sent leaves no trace on
 //! any receiver.
-//! Only `LmdbStorage::get` increments it — the replication fetch responder and
+//! Only `ChunkStore::get` increments it — the replication fetch responder and
 //! the client GET handler; audits read through `get_raw` and leave it alone.
 //! It is not keyed by chunk or requester, so it is an "it served something"
 //! signal rather than an exact per-key one; on a freshly built testnet with no
 //! other traffic to the holder, a delta means it served this fetch.
 //!
 //! Two gaps this file deliberately does not close, because neither is
-//! constructible without adding test-only hooks to `LmdbStorage`:
+//! constructible without adding test-only hooks to `ChunkStore`:
 //!
 //! - **Ordering.** Possession is checked before capacity so a full node still
 //!   accepts a key it already holds, matching `put`. Proving it needs a node
@@ -112,7 +112,7 @@ async fn ensure_pending_verify(engine: &ReplicationEngine, key: XorName, hinter:
 ///
 /// **Phase 1, the dial.** `execute_single_fetch` refuses before the dial, so no
 /// holder is conscripted. Observed through the holder's `chunks_retrieved`
-/// counter: only `LmdbStorage::get` moves it — the replication fetch responder
+/// counter: only `ChunkStore::get` moves it — the replication fetch responder
 /// and the client GET handler — while audits read through `get_raw` and leave it
 /// alone. It is not keyed by chunk or requester, so it is an "it served
 /// something" signal rather than an exact per-key one; on a freshly built

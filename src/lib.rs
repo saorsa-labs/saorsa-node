@@ -71,7 +71,7 @@ pub use event::{NodeEvent, NodeEventsChannel};
 pub use node::{NodeBuilder, RunningNode};
 pub use payment::{PaymentStatus, PaymentVerifier, PaymentVerifierConfig};
 pub use replication::{config::ReplicationConfig, ReplicationEngine};
-pub use storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
+pub use storage::{AntProtocol, ChunkStore, ChunkStoreConfig};
 
 /// Re-exports from `saorsa-core` so downstream crates (e.g. `ant-client`)
 /// can depend on `ant-node` alone without a direct `saorsa-core` dependency.

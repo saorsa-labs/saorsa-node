@@ -67,7 +67,7 @@ mod tests {
         EvmVerifierConfig, PaymentVerifier, PaymentVerifierConfig, PriceFloorConfig,
         QuoteGenerator, QuotingMetricsTracker,
     };
-    use ant_node::storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
+    use ant_node::storage::{AntProtocol, ChunkStore, ChunkStoreConfig};
     use ant_node::ReplicationConfig;
     use evmlib::testnet::Testnet;
     use evmlib::RewardsAddress;
@@ -355,10 +355,10 @@ mod tests {
 
         // Shut down node 0 completely (simulates node restart):
         // 1. Shut down the replication engine and await its background tasks
-        //    so all Arc<LmdbStorage> clones are released.
+        //    so all Arc<ChunkStore> clones are released.
         // 2. Abort the protocol task that holds an Arc<AntProtocol>.
         // 3. Drop the node's own Arc<AntProtocol>.
-        // This ensures the LMDB env is fully closed before reopening.
+        // This ensures the chunk store is fully closed before reopening.
         let data_dir = {
             let node = harness
                 .network_mut()
@@ -433,9 +433,9 @@ mod tests {
         let temp_dir = std::env::temp_dir().join(format!("{test_name}_{}", rand::random::<u64>()));
         tokio::fs::create_dir_all(&temp_dir).await?;
 
-        let storage = LmdbStorage::new(LmdbStorageConfig {
+        let storage = ChunkStore::new(ChunkStoreConfig {
             root_dir: temp_dir.clone(),
-            ..LmdbStorageConfig::test_default()
+            ..ChunkStoreConfig::test_default()
         })
         .await?;
 

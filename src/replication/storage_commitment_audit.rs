@@ -33,7 +33,7 @@ use crate::replication::subtree::{
     select_subtree_path, subtree_plan, verify_subtree_proof, StructureVerdict, SubtreeProof,
 };
 use crate::replication::types::{AuditFailureReason, AuditFailureSummary, FailureEvidence};
-use crate::storage::LmdbStorage;
+use crate::storage::ChunkStore;
 use saorsa_core::identity::PeerId;
 use saorsa_core::P2PNode;
 use tokio::sync::RwLock;
@@ -79,7 +79,7 @@ const AUDIT_READ_RETRY_BACKOFF: Duration = Duration::from_millis(200);
 /// an `Err` (transient IO) is. A persistent `Err` is returned so the caller emits
 /// `RejectKind::Transient` (timeout lane).
 async fn get_raw_retrying(
-    storage: &LmdbStorage,
+    storage: &ChunkStore,
     key: &XorName,
 ) -> crate::error::Result<Option<Vec<u8>>> {
     let mut attempt = 1u32;
@@ -1230,7 +1230,7 @@ fn subtree_failure_summary(reason: &AuditFailureReason) -> AuditFailureSummary {
 /// grace removed, the auditor treats as a confirmed failure for an in-window pin).
 pub async fn handle_subtree_challenge(
     challenge: &SubtreeAuditChallenge,
-    storage: &LmdbStorage,
+    storage: &ChunkStore,
     self_peer_id: &PeerId,
     is_bootstrapping: bool,
     commitment_state: Option<&Arc<ResponderCommitmentState>>,
@@ -1250,7 +1250,7 @@ pub async fn handle_subtree_challenge(
 pub struct Round1Work {
     /// What to send back.
     pub response: SubtreeAuditResponse,
-    /// Chunk content read from LMDB and hashed BEFORE this response was
+    /// Chunk content read from the store and hashed BEFORE this response was
     /// produced.
     ///
     /// Counted on the rejecting paths too, which is the point. A subtree is read
@@ -1267,7 +1267,7 @@ pub struct Round1Work {
 /// it performed so the caller can charge it on every exit path.
 pub async fn handle_subtree_challenge_measured(
     challenge: &SubtreeAuditChallenge,
-    storage: &LmdbStorage,
+    storage: &ChunkStore,
     self_peer_id: &PeerId,
     is_bootstrapping: bool,
     commitment_state: Option<&Arc<ResponderCommitmentState>>,
@@ -1297,7 +1297,7 @@ pub async fn handle_subtree_challenge_measured(
 #[allow(clippy::too_many_lines)]
 async fn subtree_challenge_response(
     challenge: &SubtreeAuditChallenge,
-    storage: &LmdbStorage,
+    storage: &ChunkStore,
     self_peer_id: &PeerId,
     is_bootstrapping: bool,
     commitment_state: Option<&Arc<ResponderCommitmentState>>,
@@ -1363,7 +1363,7 @@ async fn subtree_challenge_response(
     let mut leaves = Vec::with_capacity(plan.leaf_keys.len());
     for key in &plan.leaf_keys {
         // Charge the fixed cost of ATTEMPTING a leaf before the read, because
-        // it is owed whether or not the read succeeds: the LMDB lookup and its
+        // it is owed whether or not the read succeeds: the lookup and its
         // retries, and the blocking-task round trip below. Charging only
         // content bytes left both a failing leaf and a tiny one nearly free,
         // and nothing bounds a chunk from below, so a commitment of a million
@@ -1547,7 +1547,7 @@ fn build_slice_items_for_key(
 /// an answer against.
 pub async fn handle_subtree_slice_challenge(
     challenge: &SubtreeSliceChallenge,
-    storage: &LmdbStorage,
+    storage: &ChunkStore,
     self_peer_id: &PeerId,
     is_bootstrapping: bool,
     commitment_state: Option<&Arc<ResponderCommitmentState>>,
@@ -1603,7 +1603,7 @@ pub async fn handle_subtree_slice_challenge(
     };
 
     // Coalesce openings by key, preserving first-seen order and deduplicating
-    // block indices per key, so each committed chunk is read from LMDB and hashed
+    // block indices per key, so each committed chunk is read from the store and hashed
     // at most once even when the auditor opens several of its blocks (the normal
     // random + final pair, or a forged duplicate). Without this a ten-opening
     // request could re-read and re-hash the same chunk ten times.
@@ -1713,7 +1713,7 @@ enum KeyServe {
 /// `indices` is already deduplicated by the caller.
 async fn serve_committed_key_openings(
     challenge: &SubtreeSliceChallenge,
-    storage: &LmdbStorage,
+    storage: &ChunkStore,
     key: XorName,
     indices: Vec<u32>,
 ) -> KeyServe {
@@ -1758,7 +1758,7 @@ async fn serve_committed_key_openings(
         }
         // Persistent transient read error after retries → do NOT brand the peer a
         // deleter. Reject `Transient`; the auditor routes it to the timeout lane
-        // so a flaky LMDB read never manufactures a confirmed possession failure
+        // so a flaky read never manufactures a confirmed possession failure
         // on an honest holder (which also gains no credit).
         Err(e) => {
             warn!(

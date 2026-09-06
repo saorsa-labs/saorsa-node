@@ -13,9 +13,10 @@ use crate::payment::{
     EvmVerifierConfig, PaymentVerifier, PaymentVerifierConfig, PriceFloorConfig, QuoteGenerator,
 };
 use crate::replication::config::ReplicationConfig;
+use crate::replication::fresh::FreshWriteEvent;
 use crate::replication::ReplicationEngine;
-use crate::storage::lmdb::MIB;
-use crate::storage::{AntProtocol, ChunkRequestContext, LmdbStorage, LmdbStorageConfig};
+use crate::storage::MIB;
+use crate::storage::{AntProtocol, ChunkRequestContext, ChunkStore, ChunkStoreConfig};
 use crate::upgrade::{
     upgrade_cache_dir, AutoApplyUpgrader, BinaryCache, ReleaseCache, UpgradeMonitor, UpgradeResult,
 };
@@ -25,16 +26,24 @@ use saorsa_core::{
     IPDiversityConfig as CoreDiversityConfig, MultiAddr, NodeConfig as CoreNodeConfig, P2PEvent,
     P2PNode,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
+
+/// How long shutdown waits for in-flight request handlers to finish.
+///
+/// Short, because these are single request/response exchanges and the peer will retry.
+/// The point is to stop new legacy reads starting, not to see every last one through.
+const PROTOCOL_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Builder for constructing an Ant node.
 pub struct NodeBuilder {
@@ -97,10 +106,24 @@ impl NodeBuilder {
         // Ensure root directory exists
         std::fs::create_dir_all(&self.config.root_dir)?;
 
-        // One release-level decision, applied before anything can audit: while the fleet
-        // moves off the legacy chunk store, a peer is not penalised for failing to hold a
-        // chunk it was supposed to be holding. It is still penalised for failing a
-        // commitment-bound audit. Audits of both kinds run and record throughout.
+        // As soon as the root is known, and before anything is built on top of it. The
+        // store's own constructor asks this too, but a node with `storage.enabled = false`
+        // never builds a store and would walk straight past it, and turning storage off is
+        // not consent to run beside chunks this build cannot read while the commitment that
+        // claims them is still live.
+        //
+        // Ahead of the P2P node specifically. That binds transports and spawns background
+        // tasks, so asking afterwards means a bind failure can mask this answer, and a
+        // caller that does see the refusal has already been charged for a transport it is
+        // about to throw away.
+        crate::storage::legacy_artifacts::refuse_if_unmigrated(&self.config.root_dir)
+            .map_err(|e| Error::Startup(e.to_string()))?;
+
+        // One release-level decision, applied before anything can audit. It was suspended
+        // for two releases while the fleet moved off the old chunk store, because a node
+        // that has to give chunks up cannot stop its peers punishing it for that. This
+        // release restores it, so a peer is penalised again for failing to hold a chunk it
+        // was supposed to be holding. The commitment-bound audit penalised throughout.
         crate::replication::config::apply_close_group_storage_penalty_policy();
 
         // Create shutdown token
@@ -151,56 +174,20 @@ impl NodeBuilder {
             protocol.attach_p2p_node(Arc::clone(&p2p_arc));
         }
 
-        // Initialize replication engine (if storage is enabled)
-        let replication_engine = if let (Some(ref protocol), Some(fresh_rx)) =
-            (&ant_protocol, fresh_write_rx)
-        {
-            let storage_arc = protocol.storage();
-            let payment_verifier_arc = protocol.payment_verifier_arc();
-            match ReplicationEngine::new(
-                repl_config,
-                Arc::clone(&p2p_arc),
-                storage_arc,
-                payment_verifier_arc,
-                Arc::clone(&identity),
-                &self.config.root_dir,
-                fresh_rx,
-                shutdown.clone(),
-            )
-            .await
-            {
-                Ok(engine) => {
-                    // ADR-0004: wire the engine's commitment state as the
-                    // quote generator's commitment source so quotes force
-                    // their price from the live storage commitment. Done
-                    // here because the engine owns the commitment state and
-                    // is built after the protocol.
-                    if let Some(ref protocol) = ant_protocol {
-                        let concrete = Arc::clone(engine.commitment_state());
-                        let source: Arc<dyn crate::payment::quote::CommitmentSource> = concrete;
-                        protocol.attach_commitment_source(source);
-                        // ADR-0004: share the engine's gossip commitment
-                        // cache with the verifier so the cross-check can
-                        // resolve quote pins against neighbours' commitments.
-                        protocol
-                            .payment_verifier_arc()
-                            .attach_commitment_cache(Arc::clone(engine.last_commitment_by_peer()));
-                        // ADR-0004: give the verifier the monetized-pin sender so
-                        // commitments that back a payment get a deterministic
-                        // first audit from the engine's drainer.
-                        protocol
-                            .payment_verifier_arc()
-                            .attach_monetized_pin_sender(engine.monetized_pin_sender());
-                    }
-                    Some(engine)
-                }
-                Err(e) => {
-                    warn!("Failed to initialize replication engine: {e}");
-                    None
-                }
+        let replication_engine = match (&ant_protocol, fresh_write_rx) {
+            (Some(protocol), Some(fresh_rx)) => {
+                Self::build_replication_engine(
+                    protocol,
+                    repl_config,
+                    &p2p_arc,
+                    &identity,
+                    &self.config.root_dir,
+                    fresh_rx,
+                    &shutdown,
+                )
+                .await?
             }
-        } else {
-            None
+            _ => None,
         };
 
         let node = RunningNode {
@@ -213,10 +200,67 @@ impl NodeBuilder {
             ant_protocol,
             replication_engine,
             protocol_task: None,
+            protocol_children: TaskTracker::new(),
             upgrade_exit_code: Arc::new(AtomicI32::new(-1)),
         };
 
         Ok(node)
+    }
+
+    /// Start the replication engine.
+    ///
+    /// # Errors
+    ///
+    /// Never, currently: an engine that fails to start is logged and the node runs without
+    /// one, as it always has. The signature keeps its `Result` because the caller's does,
+    /// and because the migration release did have a case that had to refuse.
+    async fn build_replication_engine(
+        protocol: &Arc<AntProtocol>,
+        repl_config: ReplicationConfig,
+        p2p: &Arc<P2PNode>,
+        identity: &Arc<NodeIdentity>,
+        root_dir: &Path,
+        fresh_rx: UnboundedReceiver<FreshWriteEvent>,
+        shutdown: &CancellationToken,
+    ) -> Result<Option<ReplicationEngine>> {
+        let engine = match ReplicationEngine::new(
+            repl_config,
+            Arc::clone(p2p),
+            protocol.storage(),
+            protocol.payment_verifier_arc(),
+            Arc::clone(identity),
+            root_dir,
+            fresh_rx,
+            shutdown.clone(),
+        )
+        .await
+        {
+            Ok(engine) => engine,
+            Err(e) => {
+                warn!("Failed to initialize replication engine: {e}");
+                return Ok(None);
+            }
+        };
+
+        // ADR-0004: wire the engine's commitment state as the quote generator's
+        // commitment source so quotes force their price from the live storage
+        // commitment. Done here because the engine owns the commitment state and is
+        // built after the protocol.
+        let concrete = Arc::clone(engine.commitment_state());
+        let source: Arc<dyn crate::payment::quote::CommitmentSource> = concrete;
+        protocol.attach_commitment_source(source);
+        // ADR-0004: share the engine's gossip commitment cache with the verifier so the
+        // cross-check can resolve quote pins against neighbours' commitments.
+        protocol
+            .payment_verifier_arc()
+            .attach_commitment_cache(Arc::clone(engine.last_commitment_by_peer()));
+        // ADR-0004: give the verifier the monetized-pin sender so commitments that back
+        // a payment get a deterministic first audit from the engine's drainer.
+        protocol
+            .payment_verifier_arc()
+            .attach_monetized_pin_sender(engine.monetized_pin_sender());
+
+        Ok(Some(engine))
     }
 
     /// Build the saorsa-core `NodeConfig` from our config.
@@ -387,26 +431,23 @@ impl NodeBuilder {
 
         monitor
     }
-
     /// Build the ANT protocol handler from config.
     ///
-    /// Initializes LMDB storage, payment verifier, and quote generator.
+    /// Initializes the chunk store, payment verifier, and quote generator.
     /// Wires ML-DSA-65 signing from the node's identity into the quote generator.
     async fn build_ant_protocol(
         config: &NodeConfig,
         identity: &NodeIdentity,
         close_group_size: usize,
     ) -> Result<AntProtocol> {
-        // Create LMDB storage
-        let storage_config = LmdbStorageConfig {
+        let storage_config = ChunkStoreConfig {
             root_dir: config.root_dir.clone(),
             verify_on_read: config.storage.verify_on_read,
-            max_map_size: config.storage.db_size_gb.saturating_mul(1024 * 1024 * 1024),
             disk_reserve: config.storage.disk_reserve_mb.saturating_mul(MIB),
         };
-        let storage = LmdbStorage::new(storage_config)
+        let storage = ChunkStore::new(storage_config)
             .await
-            .map_err(|e| Error::Startup(format!("Failed to create LMDB storage: {e}")))?;
+            .map_err(|e| Error::Startup(format!("Failed to create the chunk store: {e}")))?;
 
         // Parse rewards address (required — node must know where to receive payments)
         let rewards_address = match config.payment.rewards_address {
@@ -472,6 +513,13 @@ pub struct RunningNode {
     replication_engine: Option<ReplicationEngine>,
     /// Protocol message routing background task.
     protocol_task: Option<JoinHandle<()>>,
+    /// The per-message handler tasks the protocol loop spawns.
+    ///
+    /// Tracked rather than detached so shutdown can stop accepting work and then wait for
+    /// what is already in flight. Aborting only the loop leaves its children running, and
+    /// a chunk read that outlives the loop keeps working against a store the shutdown is
+    /// about to tear down.
+    protocol_children: TaskTracker,
     /// Exit code requested by a successful upgrade (-1 = no upgrade exit pending).
     upgrade_exit_code: Arc<AtomicI32>,
 }
@@ -697,18 +745,46 @@ impl RunningNode {
 
         info!("Node running, waiting for shutdown signal");
 
-        // Run the main event loop with signal handling
+        // The main event loop, with signal handling. Everything above this starts
+        // something; this is where the node waits.
         self.run_event_loop().await?;
 
-        // Shutdown replication engine before P2P so background tasks don't
-        // use a dead P2P layer, and Arc<LmdbStorage> references are released.
-        if let Some(ref mut engine) = self.replication_engine {
-            engine.shutdown().await;
-        }
-
-        // Stop protocol routing task
+        // Protocol routing stops first, loop and children both. The routing loop waits on
+        // `events.recv()` and has no cancellation branch of its own, and it holds an `Arc`
+        // on the P2P node that keeps the sender it is waiting on alive, so nothing else
+        // here will ever wake it. Left running it holds the chunk store and its
+        // single-process lock open after the node has returned. Aborting the accept loop
+        // alone is not enough either: the requests already in flight run in their own
+        // tasks, which is what the drain below is for.
         if let Some(handle) = self.protocol_task.take() {
             handle.abort();
+            // Awaited, not just asked to stop. `abort` schedules cancellation; it does not
+            // establish that the task is gone, and what matters here is that it has
+            // dropped its `Arc` on the protocol and with it the store's single-process
+            // lock before this function returns. The join resolves as cancelled.
+            let _ = handle.await;
+        }
+        // Cancelled first, so anything still queued behind the concurrency permits gives
+        // up rather than starting fresh storage work, then given a moment to finish what
+        // is genuinely in flight.
+        self.shutdown.cancel();
+        self.protocol_children.close();
+        if tokio::time::timeout(PROTOCOL_DRAIN_GRACE, self.protocol_children.wait())
+            .await
+            .is_err()
+        {
+            warn!(
+                "{} request handler(s) had not finished after {}s; continuing shutdown \
+                 without them.",
+                self.protocol_children.len(),
+                PROTOCOL_DRAIN_GRACE.as_secs()
+            );
+        }
+
+        // Shutdown replication engine before P2P so background tasks don't
+        // use a dead P2P layer, and Arc<ChunkStore> references are released.
+        if let Some(ref mut engine) = self.replication_engine {
+            engine.shutdown().await;
         }
 
         // Shutdown P2P node
@@ -783,6 +859,58 @@ impl RunningNode {
         Ok(())
     }
 
+    /// Handle one inbound protocol message and send whatever it produced.
+    async fn answer_one_request(
+        protocol: &Arc<AntProtocol>,
+        p2p: &Arc<P2PNode>,
+        source: &saorsa_core::identity::PeerId,
+        data: &[u8],
+        data_type: &str,
+        response_topic: &str,
+        received_at: Instant,
+    ) {
+        if data_type != "chunk" {
+            return;
+        }
+        let queue_wait = received_at.elapsed();
+        let handled = protocol
+            .try_handle_request_with_context(
+                data,
+                Some(ChunkRequestContext::new(
+                    source.to_string(),
+                    received_at,
+                    queue_wait,
+                )),
+            )
+            .await;
+        let telemetry = handled.get_telemetry;
+        match handled.response {
+            Ok(Some(response)) => {
+                let send_started = Instant::now();
+                let send_result = p2p
+                    .send_message(source, response_topic, response.to_vec(), &[])
+                    .await;
+                if let Some(telemetry) = telemetry {
+                    telemetry.finish_send(send_started.elapsed(), send_result.is_ok());
+                }
+                if let Err(e) = send_result {
+                    warn!("Failed to send {data_type} protocol response to {source}: {e}");
+                }
+            }
+            Ok(None) => {
+                if let Some(telemetry) = telemetry {
+                    telemetry.finish_without_send("no_response");
+                }
+            }
+            Err(e) => {
+                if let Some(telemetry) = telemetry {
+                    telemetry.finish_without_send("encode_error");
+                }
+                warn!("{data_type} protocol handler error: {e}");
+            }
+        }
+    }
+
     /// Start the protocol message routing background task.
     ///
     /// Subscribes to P2P events and routes incoming chunk protocol messages
@@ -796,6 +924,8 @@ impl RunningNode {
         let mut events = self.p2p_node.subscribe_events();
         let p2p = Arc::clone(&self.p2p_node);
         let semaphore = Arc::new(Semaphore::new(64));
+        let children = self.protocol_children.clone();
+        let stopping = self.shutdown.clone();
 
         self.protocol_task = Some(tokio::spawn(async move {
             while let Ok(event) = events.recv().await {
@@ -818,60 +948,38 @@ impl RunningNode {
                         let protocol = Arc::clone(&protocol);
                         let p2p = Arc::clone(&p2p);
                         let sem = semaphore.clone();
-                        tokio::spawn(async move {
-                            let Ok(_permit) = sem.acquire().await else {
+                        let stopping = stopping.clone();
+                        children.spawn(async move {
+                            // A queued handler must not start work once shutdown has
+                            // begun. With 64 permits and a busy node the queue behind them
+                            // can be long, and every one of those would otherwise start
+                            // fresh storage reads while the store beneath is being torn
+                            // down.
+                            let _permit = {
+                                let acquired = tokio::select! {
+                                    biased;
+                                    () = stopping.cancelled() => return,
+                                    p = sem.acquire() => p,
+                                };
+                                match acquired {
+                                    Ok(permit) => permit,
+                                    Err(_) => return,
+                                }
+                            };
+                            // Checked again: the wait for a permit may have been long.
+                            if stopping.is_cancelled() {
                                 return;
-                            };
-                            let queue_wait = received_at.elapsed();
-                            let handled = match data_type {
-                                "chunk" => {
-                                    protocol
-                                        .try_handle_request_with_context(
-                                            &data,
-                                            Some(ChunkRequestContext::new(
-                                                source.to_string(),
-                                                received_at,
-                                                queue_wait,
-                                            )),
-                                        )
-                                        .await
-                                }
-                                _ => return,
-                            };
-                            let telemetry = handled.get_telemetry;
-                            match handled.response {
-                                Ok(Some(response)) => {
-                                    let send_started = Instant::now();
-                                    let send_result = p2p
-                                        .send_message(
-                                            &source,
-                                            response_topic,
-                                            response.to_vec(),
-                                            &[],
-                                        )
-                                        .await;
-                                    if let Some(telemetry) = telemetry {
-                                        telemetry.finish_send(
-                                            send_started.elapsed(),
-                                            send_result.is_ok(),
-                                        );
-                                    }
-                                    if let Err(e) = send_result {
-                                        warn!("Failed to send {data_type} protocol response to {source}: {e}");
-                                    }
-                                }
-                                Ok(None) => {
-                                    if let Some(telemetry) = telemetry {
-                                        telemetry.finish_without_send("no_response");
-                                    }
-                                }
-                                Err(e) => {
-                                    if let Some(telemetry) = telemetry {
-                                        telemetry.finish_without_send("encode_error");
-                                    }
-                                    warn!("{data_type} protocol handler error: {e}");
-                                }
                             }
+                            Self::answer_one_request(
+                                &protocol,
+                                &p2p,
+                                &source,
+                                &data,
+                                data_type,
+                                response_topic,
+                                received_at,
+                            )
+                            .await;
                         });
                     }
                 }
@@ -901,6 +1009,131 @@ fn jittered_interval(base: std::time::Duration) -> std::time::Duration {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use rand::Rng;
+    use tempfile::TempDir;
+
+    /// The e2e port range, so a test bind never lands on a production or dev instance.
+    const TEST_PORT_RANGE: std::ops::Range<u16> = 20000..60000;
+
+    /// How many times a bind is retried before the failure is treated as real.
+    const BIND_ATTEMPTS: u32 = 5;
+
+    /// A well-formed address that receives nothing; no chain is contacted in these tests.
+    const TEST_REWARDS_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
+
+    /// A node config that builds without touching a chain or a real network.
+    fn local_node_config(root: &std::path::Path, port: u16) -> NodeConfig {
+        NodeConfig {
+            root_dir: root.to_path_buf(),
+            port,
+            ipv4_only: true,
+            network_mode: NetworkMode::Development,
+            payment: crate::config::PaymentConfig {
+                rewards_address: Some(TEST_REWARDS_ADDRESS.to_string()),
+                ..crate::config::PaymentConfig::default()
+            },
+            ..NodeConfig::default()
+        }
+    }
+
+    /// A node builds on a root with nothing left over from the old store.
+    #[tokio::test]
+    async fn a_node_builds_on_a_clean_root() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path().join("node");
+        std::fs::create_dir_all(&root).expect("mkdir");
+
+        let mut built = None;
+        let mut last_err = String::new();
+        for _ in 0..BIND_ATTEMPTS {
+            let port = rand::thread_rng().gen_range(TEST_PORT_RANGE);
+            match NodeBuilder::new(local_node_config(&root, port))
+                .build()
+                .await
+            {
+                Ok(node) => {
+                    built = Some(node);
+                    break;
+                }
+                Err(e) => {
+                    last_err = e.to_string();
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            }
+        }
+        let Some(node) = built else {
+            panic!("could not build a node after {BIND_ATTEMPTS} attempts: {last_err}");
+        };
+
+        node.shutdown.cancel();
+    }
+
+    /// A node with chunks in a store this build cannot read does not start, however it is
+    /// configured.
+    ///
+    /// Both ways, because they are different code paths and only one of them was covered.
+    /// The store's own constructor asks the question, but a node with `storage.enabled =
+    /// false` never builds a store and so never reaches it. Turning storage off is not
+    /// consent to run beside chunks that this node's own published commitment still claims
+    /// and that this build cannot read, so the question is asked before anything is built.
+    ///
+    /// Goes through `build()` rather than the check directly. The failure worth catching
+    /// here is the call site going missing, which is what happened: the check existed and
+    /// one of the two routes into the node walked straight past it.
+    #[tokio::test]
+    async fn a_node_with_an_unmigrated_store_refuses_to_build_however_it_is_configured() {
+        for storage_enabled in [true, false] {
+            let dir = TempDir::new().expect("temp dir");
+            let root = dir.path().join("node");
+            let env = root.join(crate::storage::LEGACY_ENV_DIR);
+            std::fs::create_dir_all(&env).expect("mkdir");
+            std::fs::write(env.join("data.mdb"), b"chunks that were never copied out")
+                .expect("seed");
+
+            let port = rand::thread_rng().gen_range(TEST_PORT_RANGE);
+            let mut config = local_node_config(&root, port);
+            config.storage.enabled = storage_enabled;
+
+            let err = NodeBuilder::new(config)
+                .build()
+                .await
+                .err()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "a node with an unmigrated store built with storage.enabled = \
+                         {storage_enabled}"
+                    )
+                });
+            let said = err.to_string();
+            assert!(
+                said.contains("chunks.mdb"),
+                "the refusal must name the directory (storage.enabled = {storage_enabled}): \
+                 {said}"
+            );
+        }
+
+        // And it answers before the transport is built, not after. Asking afterwards means
+        // a bind failure masks this answer, and a caller that does see it has already been
+        // charged for a transport it is about to throw away. Staged with a privileged port,
+        // which an ordinary user cannot bind, so P2P construction would fail if it were
+        // reached: the refusal still has to be the one that comes back.
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path().join("node");
+        let env = root.join(crate::storage::LEGACY_ENV_DIR);
+        std::fs::create_dir_all(&env).expect("mkdir");
+        std::fs::write(env.join("data.mdb"), b"never copied out").expect("seed");
+
+        let said = NodeBuilder::new(local_node_config(&root, 1))
+            .build()
+            .await
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            said.contains("chunks.mdb"),
+            "the store answer must come back before the transport is built, got: {said}"
+        );
+    }
     use super::*;
     use crate::config::NODES_SUBDIR;
 

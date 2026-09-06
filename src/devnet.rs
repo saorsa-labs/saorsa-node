@@ -11,7 +11,7 @@ use crate::payment::{
     QuotingMetricsTracker,
 };
 use crate::replication::config::ReplicationConfig;
-use crate::storage::{AntProtocol, ChunkRequestContext, LmdbStorage, LmdbStorageConfig};
+use crate::storage::{AntProtocol, ChunkRequestContext, ChunkStore, ChunkStoreConfig};
 use evmlib::Network as EvmNetwork;
 use evmlib::RewardsAddress;
 use rand::Rng;
@@ -595,14 +595,14 @@ impl Devnet {
         identity: &NodeIdentity,
         config: &DevnetConfig,
     ) -> Result<AntProtocol> {
-        let storage_config = LmdbStorageConfig {
+        let storage_config = ChunkStoreConfig {
             root_dir: data_dir.to_path_buf(),
             verify_on_read: true,
-            ..LmdbStorageConfig::default()
+            ..ChunkStoreConfig::default()
         };
-        let storage = LmdbStorage::new(storage_config)
+        let storage = ChunkStore::new(storage_config)
             .await
-            .map_err(|e| DevnetError::Core(format!("Failed to create LMDB storage: {e}")))?;
+            .map_err(|e| DevnetError::Core(format!("Failed to create the chunk store: {e}")))?;
 
         let evm_config = EvmVerifierConfig {
             network: config

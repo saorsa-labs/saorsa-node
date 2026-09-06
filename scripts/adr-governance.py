@@ -53,6 +53,12 @@ def changed_files_against_base(base: str) -> list[str]:
             return []
 
 
+def base_adr_names(ref: str) -> list[str]:
+    """ADR filenames present on `ref`."""
+    listing = run(["git", "ls-tree", "--name-only", ref, "docs/adr/"])
+    return [Path(line).name for line in listing.splitlines() if line.startswith("docs/adr/ADR-")]
+
+
 def file_at(ref: str, path: str) -> str | None:
     try:
         return run(["git", "show", f"{ref}:{path}"])
@@ -82,6 +88,29 @@ def main() -> int:
         if number in seen_numbers:
             errors.append(f"{path}: duplicate ADR number also used by {seen_numbers[number]}")
         seen_numbers[number] = path
+
+    # And against the base branch, which is the check that actually catches this. A branch
+    # cut before another ADR merged does not contain it, so the loop above sees one file
+    # per number and passes, and the duplicate only exists once the two are merged
+    # together. That has happened here: a branch claimed a number main had already used and
+    # its governance run was green the whole time.
+    if base:
+        for path in sorted(changed_adr_paths):
+            if not path.exists() or file_at(base, str(path)) is not None:
+                # Not added by this PR: either gone, or already on the base under this
+                # exact name, in which case it is the same ADR rather than a clash.
+                continue
+            number = path.name.split("-", 2)[1] if "-" in path.name else path.name
+            for taken in base_adr_names(base):
+                if taken == path.name:
+                    continue
+                taken_number = taken.split("-", 2)[1] if "-" in taken else taken
+                if taken_number == number:
+                    errors.append(
+                        f"{path}: ADR number {number} is already used on {base} by "
+                        f"docs/adr/{taken}. Pick the next free number; merging both would "
+                        f"leave two different ADRs wearing one number."
+                    )
 
     for path in files_to_validate:
         if not FILENAME_RE.match(path.name):

@@ -37,7 +37,7 @@ impl QuotingMetricsTracker {
     ///
     /// This is the deletion-aware path and the SINGLE source of truth for the
     /// priced record count: the handler calls it at quote time with the live
-    /// LMDB entry count (`current_chunks()`), so any record removed from
+    /// live chunk count (`current_chunks()`), so any record removed from
     /// storage — by delete, prune, or otherwise — is reflected on the next
     /// quote with no per-delete bookkeeping to keep in sync. `record_store`
     /// remains only an optimistic between-quote hint; the resync overwrites it.

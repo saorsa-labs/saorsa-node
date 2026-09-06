@@ -97,7 +97,7 @@ use crate::replication::types::{
     NeighborSyncState, PeerSyncRecord, PresenceEvidence, RepairProofs, VerificationEntry,
     VerificationState,
 };
-use crate::storage::{CapacityVerdict, LmdbStorage};
+use crate::storage::{CapacityVerdict, ChunkStore};
 use saorsa_core::identity::{NodeIdentity, PeerId};
 use saorsa_core::{DhtNetworkEvent, P2PEvent, P2PNode, TrustEvent};
 use saorsa_pqc::api::sig::{MlDsaSecretKey, MlDsaVariant};
@@ -992,7 +992,7 @@ const INBOUND_REPLICATION_SERIAL_QUEUE_CAPACITY: usize = 64;
 /// Maximum fresh-replication offers processed concurrently, away from the
 /// serial non-audit loop.
 ///
-/// Fresh offers can perform an on-chain payment verification and a 4 MiB LMDB
+/// Fresh offers can perform an on-chain payment verification and a 4 MiB
 /// write. Four workers keep that latency off the responder dispatch path while
 /// keeping concurrent EVM/storage pressure small and predictable.
 const FRESH_OFFER_WORKER_LIMIT: usize = 4;
@@ -1126,7 +1126,7 @@ const FETCH_RESPONDER_MAX_OUTSTANDING_PER_PEER: u32 = 2;
 
 /// Maximum verification batches served concurrently.
 ///
-/// LMDB point lookups are fast, but a batch can contain 8,192 of them. Two
+/// Point lookups are fast, but a batch can contain 8,192 of them. Two
 /// workers isolate that synchronous work from message dispatch without turning
 /// large batches into an I/O fan-out throughput contest.
 const VERIFICATION_RESPONDER_WORKER_LIMIT: usize = 2;
@@ -1442,7 +1442,7 @@ impl Drop for FreshOfferEntryGuard {
 struct VerificationCycleContext<'a> {
     p2p_node: &'a Arc<P2PNode>,
     paid_list: &'a Arc<PaidList>,
-    storage: &'a Arc<LmdbStorage>,
+    storage: &'a Arc<ChunkStore>,
     queues: &'a Arc<RwLock<ReplicationQueues>>,
     config: &'a ReplicationConfig,
     bootstrap_state: &'a Arc<RwLock<BootstrapState>>,
@@ -1484,13 +1484,13 @@ const BOOTSTRAP_DRAIN_CHECK_SECS: u64 = 5;
 /// observe the cancellation token and terminate before aborting it.
 ///
 /// Detached tasks are drained without a timeout because storage-capable work
-/// may be awaiting a `spawn_blocking` LMDB operation, which continues running
+/// may be awaiting a `spawn_blocking` storage operation, which continues running
 /// if its async waiter is dropped.
 const SHUTDOWN_TASK_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How often the responder rebuilds + rotates its storage commitment.
 ///
-/// Each rebuild scans LMDB to compute leaf hashes; for ~10k keys this is
+/// Each rebuild scans the store to compute leaf hashes; for ~10k keys this is
 /// sub-100ms (BLAKE3 + tree build). Retention is gossip-anchored, NOT
 /// rotation-anchored: the responder stays answerable for the current
 /// commitment plus every root it recently gossiped that is still in-window
@@ -1655,7 +1655,7 @@ pub struct ReplicationEngine {
     /// P2P networking node.
     p2p_node: Arc<P2PNode>,
     /// Local chunk storage.
-    storage: Arc<LmdbStorage>,
+    storage: Arc<ChunkStore>,
     /// Persistent paid-for-list.
     paid_list: Arc<PaidList>,
     /// Payment verifier for `PoP` validation.
@@ -1700,7 +1700,7 @@ pub struct ReplicationEngine {
     identity: Arc<NodeIdentity>,
     /// Responder-side commitment state (two-slot atomic rotation).
     ///
-    /// Periodically rebuilt from the live LMDB key set; gossiped on
+    /// Periodically rebuilt from the live key set; gossiped on
     /// outbound `NeighborSyncRequest`/`Response`; consulted by the
     /// commitment-bound audit handler.
     commitment_state: Arc<ResponderCommitmentState>,
@@ -1860,7 +1860,7 @@ impl ReplicationEngine {
     pub async fn new(
         config: ReplicationConfig,
         p2p_node: Arc<P2PNode>,
-        storage: Arc<LmdbStorage>,
+        storage: Arc<ChunkStore>,
         payment_verifier: Arc<PaymentVerifier>,
         identity: Arc<NodeIdentity>,
         root_dir: &Path,
@@ -1986,6 +1986,24 @@ impl ReplicationEngine {
     #[must_use]
     pub fn commitment_state(&self) -> &Arc<ResponderCommitmentState> {
         &self.commitment_state
+    }
+
+    /// Neighbour-sync state, for the storage migration's possession challenges.
+    #[must_use]
+    pub fn sync_state(&self) -> &Arc<RwLock<NeighborSyncState>> {
+        &self.sync_state
+    }
+
+    /// The audit-challenge coordinator, for the storage migration's possession challenges.
+    #[must_use]
+    pub fn audit_challenge_coordinator(&self) -> &Arc<AuditChallengeCoordinator> {
+        &self.audit_challenge_coordinator
+    }
+
+    /// Replication settings, for the storage migration's possession challenges.
+    #[must_use]
+    pub fn config(&self) -> &Arc<ReplicationConfig> {
+        &self.config
     }
 
     /// Get a reference to the auditor's last-commitment-by-peer table.
@@ -2264,15 +2282,15 @@ impl ReplicationEngine {
     /// Cancel all background tasks and wait for them to terminate.
     ///
     /// This must be awaited before dropping the engine when the caller needs
-    /// the `Arc<LmdbStorage>` references held by background tasks to be
-    /// released (e.g. before reopening the same LMDB environment).
+    /// the `Arc<ChunkStore>` references held by background tasks to be
+    /// released (e.g. before reopening the same store).
     ///
     /// When this returns, no engine-spawned task still holds
-    /// `Arc<LmdbStorage>` or `Arc<PaidList>`, and no LMDB blocking operation
-    /// (read or write, on either the chunk store or the paid-list
+    /// `Arc<ChunkStore>` or `Arc<PaidList>`, and no blocking storage operation
+    /// (read or write, against either the chunk store or the paid-list LMDB
     /// environment) is still running.  Engine tasks race their work against
     /// the shutdown token; a dropped future may leave a `spawn_blocking`
-    /// LMDB transaction running detached, so this method additionally waits
+    /// operation running detached, so this method additionally waits
     /// for both storage layers to go quiescent before returning.
     pub async fn shutdown(&mut self) {
         self.shutdown.cancel();
@@ -2313,11 +2331,12 @@ impl ReplicationEngine {
         // All producers have stopped, so close and drain their detached work.
         // A started storage operation must run to completion: dropping an async
         // waiter does not cancel `spawn_blocking`, and would let shutdown return
-        // while an LMDB transaction still owns the environment.
+        // while a blocking storage operation is still running.
         //
-        // Deliberately unbounded: the LMDB contract requires every worker to
-        // release its `Arc<LmdbStorage>` before the caller may reopen the
-        // environment, and a timeout here could return with one still held.
+        // Deliberately unbounded: every worker has to release its
+        // `Arc<ChunkStore>` before the caller may reopen the store, whose lock
+        // admits one process at a time, and a timeout here could return with one
+        // still held.
         // What makes that safe is that every detached task is now guaranteed to
         // finish — the pools above are closed, stale work is shed at dequeue,
         // and the one genuinely unbounded await (payment verification) races
@@ -2326,7 +2345,7 @@ impl ReplicationEngine {
         self.detached_task_tracker.wait().await;
 
         // Every producer is gone, but a select! racing the shutdown token may
-        // have dropped a future while it awaited an LMDB `spawn_blocking` op
+        // have dropped a future while it awaited a storage `spawn_blocking` op
         // (fetch `storage.put`, prune `storage.delete` /
         // `paid_list.remove_batch`, verification `paid_list.insert`).  The
         // detached blocking closure owns a cloned `Env`; wait for both
@@ -2463,12 +2482,12 @@ impl ReplicationEngine {
                             // so those waiters would drain only at the probe timeout
                             // (roughly `queued / per-target-limit` probes deep) while
                             // `detached_task_tracker.wait()` — deliberately unbounded
-                            // for the LMDB contract — held shutdown open.
+                            // for the storage contract — held shutdown open.
                             //
                             // Dropping this future mid-probe is safe and is the same
                             // shape the neighbor-sync round uses: a parked coordinator
                             // acquire releases its counted reference via
-                            // `ReferenceGuard`, and a dropped LMDB `spawn_blocking` is
+                            // `ReferenceGuard`, and a dropped storage `spawn_blocking` is
                             // covered by the storage-quiescence wait in `shutdown`.
                             tokio::select! {
                                 () = shutdown.cancelled() => {}
@@ -3319,7 +3338,7 @@ impl ReplicationEngine {
     ///
     /// Phase 3 of the v12 storage-bound audit. Once per
     /// [`COMMITMENT_ROTATION_INTERVAL_SECS`], the responder reads the
-    /// current LMDB key set, builds a Merkle tree (for content-addressed
+    /// current key set, builds a Merkle tree (for content-addressed
     /// chunks `bytes_hash == key`, so no chunk re-read is needed), signs
     /// the root with the node's `MlDsaSecretKey`, and rotates the result
     /// into `commitment_state`. Old `previous` slot is dropped by the
@@ -3605,7 +3624,7 @@ impl ReplicationEngine {
                         in_flight.push(Box::pin(async move {
                             // Tracked so shutdown() still awaits the task if
                             // this awaiter is dropped (e.g. the worker is
-                            // aborted): it holds Arc<LmdbStorage> and must
+                            // aborted): it holds Arc<ChunkStore> and must
                             // not outlive the engine.
                             let handle = tracker.spawn(async move {
                                 // Cancel-aware: abort when the engine shuts down.
@@ -4254,7 +4273,7 @@ struct PeerResponderSlot {
 #[derive(Clone)]
 struct ReplicationMessageHandlerContext {
     p2p_node: Arc<P2PNode>,
-    storage: Arc<LmdbStorage>,
+    storage: Arc<ChunkStore>,
     paid_list: Arc<PaidList>,
     payment_verifier: Arc<PaymentVerifier>,
     queues: Arc<RwLock<ReplicationQueues>>,
@@ -4292,7 +4311,7 @@ struct ReplicationMessageHandlerContext {
     /// The engine's shutdown token, for detached responder work.
     ///
     /// Workers on [`Self::detached_task_tracker`] race this around their
-    /// *network* phase only — never around an LMDB `spawn_blocking` await,
+    /// *network* phase only — never around a storage `spawn_blocking` await,
     /// where dropping the awaiter would detach a live transaction. This is
     /// what lets `shutdown()` keep its unbounded `tracker.wait()` and still
     /// terminate: the wait stays safe because it is now guaranteed finite.
@@ -5469,7 +5488,7 @@ async fn handle_replication_message(
 /// is guaranteed to end.
 ///
 /// Deliberately NOT applied to `storage.put`: that awaits `spawn_blocking`, so
-/// dropping its awaiter would detach a live LMDB transaction and break the
+/// dropping its awaiter would detach a live storage operation and break the
 /// very contract the unbounded wait exists to uphold.
 async fn verify_payment_until_shutdown(
     payment_verifier: &Arc<PaymentVerifier>,
@@ -5699,7 +5718,7 @@ async fn refuse_stranded_fresh_offers(
 ///
 /// This runs on the serial non-audit message loop, so it must stay cheap: every
 /// path here is a set insert, a permit try, or a small response send. The offer
-/// itself — an on-chain payment verification and a multi-MiB LMDB write — always
+/// itself — an on-chain payment verification and a multi-MiB write — always
 /// runs on a tracked worker task, never inline, because stalling this loop backs
 /// up the inbound queue and ultimately drops replication messages wholesale.
 ///
@@ -5844,7 +5863,7 @@ async fn dispatch_fresh_offer(
 
     let ctx = ctx.clone();
     // Track the worker so `ReplicationEngine::shutdown()` can await it: it holds
-    // an `Arc<LmdbStorage>` while writing, and the shutdown contract requires
+    // an `Arc<ChunkStore>` while writing, and the shutdown contract requires
     // those references be released before the caller reopens the environment.
     ctx.detached_task_tracker
         .clone()
@@ -5856,7 +5875,7 @@ async fn dispatch_fresh_offer(
 ///
 /// Split out so `dispatch_fresh_offer` stays a readable admission decision.
 /// A started handler is never cancelled: `storage.put()` awaits
-/// `spawn_blocking`, and dropping that awaiter would detach the live LMDB
+/// `spawn_blocking`, and dropping that awaiter would detach the live storage
 /// transaction. Shutdown responsiveness comes from the closed worker semaphore
 /// and from `handle_fresh_offer` racing the token around payment verification.
 ///
@@ -6492,7 +6511,7 @@ async fn handle_neighbor_sync_request(
     source: &PeerId,
     request: &protocol::NeighborSyncRequest,
     p2p_node: &Arc<P2PNode>,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     paid_list: &Arc<PaidList>,
     queues: &Arc<RwLock<ReplicationQueues>>,
     config: &ReplicationConfig,
@@ -6683,7 +6702,7 @@ pub fn verification_requests_for_key_from_for_test(requester: &PeerId, key: &Xor
 async fn handle_verification_request(
     source: &PeerId,
     request: &protocol::VerificationRequest,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     paid_list: &Arc<PaidList>,
     p2p_node: &Arc<P2PNode>,
     request_id: u64,
@@ -6979,9 +6998,9 @@ fn request_is_stale(received_at: Instant, timeout: Duration) -> bool {
 enum FetchFault {
     /// The peer does not hold a chunk it was expected to hold.
     ///
-    /// This is the lane the release withholds, because a node part-way through moving
-    /// off the legacy store answers exactly this way about chunks it has legitimately
-    /// given up.
+    /// This was the lane the migration releases withheld, because a node part-way through
+    /// moving off the old store answered exactly this way about chunks it had legitimately
+    /// given up. That is over, and it is penalised again.
     UnheldChunk,
     /// The peer's own storage failed, or served bytes that no longer hash to their
     /// address.
@@ -7057,7 +7076,7 @@ fn fetch_response_for(key: XorName, read: Result<Option<Vec<u8>>>) -> protocol::
 async fn handle_fetch_request(
     source: &PeerId,
     request: &protocol::FetchRequest,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     p2p_node: &Arc<P2PNode>,
     request_id: u64,
     rr_message_id: Option<&str>,
@@ -7089,7 +7108,7 @@ struct AuditResponderCompletion {
 async fn handle_audit_challenge_msg(
     source: &PeerId,
     challenge: &protocol::AuditChallenge,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     p2p_node: &Arc<P2PNode>,
     is_bootstrapping: bool,
     reply: ReplyRoute<'_>,
@@ -7353,7 +7372,7 @@ async fn record_sent_replica_hints(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_neighbor_sync_round(
     p2p_node: &Arc<P2PNode>,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     paid_list: &Arc<PaidList>,
     queues: &Arc<RwLock<ReplicationQueues>>,
     config: &ReplicationConfig,
@@ -7455,9 +7474,11 @@ async fn run_neighbor_sync_round(
     // same value across the batch is fine and reduces RwLock churn). Atomically
     // snapshot + mark-gossiped so we stay answerable for exactly what we emit
     // (ADR-0002 retention), with no TOCTOU vs a concurrent retire/rotate.
-    let my_commitment = commitment_state
-        .current_for_gossip()
-        .map(|b| b.commitment().clone());
+    let gossiped = commitment_state.current_for_gossip();
+    // The hash actually put on the wire, captured with the payload. A rotation later in
+    // the round must not let a reply be credited to a root the peer never saw.
+    let gossiped_hash = gossiped.as_ref().map(|b| b.hash());
+    let my_commitment = gossiped.map(|b| b.commitment().clone());
 
     let mut hints_by_peer = neighbor_sync::build_sync_hints_for_peers(
         &batch,
@@ -7483,6 +7504,13 @@ async fn run_neighbor_sync_round(
         .await;
 
         if let Some(outcome) = outcome {
+            // The peer answered, so the request that carried our commitment root arrived.
+            // That is proof of delivery rather than proof of emission, and the storage
+            // migration will not let a node give anything up until its close group has
+            // actually seen the reduced root.
+            if let Some(hash) = gossiped_hash {
+                commitment_state.note_commitment_delivered(*peer, hash);
+            }
             handle_sync_response(
                 &self_id,
                 peer,
@@ -7537,6 +7565,14 @@ async fn run_neighbor_sync_round(
                 .await;
 
                 if let Some(outcome) = replacement_outcome {
+                    // Same payload, same round trip, same proof: a reply can only come
+                    // back if the request carrying the root reached this peer. Omitting it
+                    // here made the counter under-report on any node whose primary syncs
+                    // often fall through to a replacement, which is exactly the node most
+                    // likely to be short of disk, and stalled its migration indefinitely.
+                    if let Some(hash) = gossiped_hash {
+                        commitment_state.note_commitment_delivered(replacement_peer, hash);
+                    }
                     handle_sync_response(
                         &self_id,
                         &replacement_peer,
@@ -7577,7 +7613,7 @@ async fn handle_sync_response(
     config: &ReplicationConfig,
     bootstrapping: bool,
     bootstrap_state: &Arc<RwLock<BootstrapState>>,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     paid_list: &Arc<PaidList>,
     queues: &Arc<RwLock<ReplicationQueues>>,
     sync_state: &Arc<RwLock<NeighborSyncState>>,
@@ -7773,7 +7809,7 @@ async fn admit_and_queue_hints(
     paid_hints: &[XorName],
     p2p_node: &Arc<P2PNode>,
     config: &ReplicationConfig,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     paid_list: &Arc<PaidList>,
     queues: &Arc<RwLock<ReplicationQueues>>,
 ) -> AdmissionOutcome {
@@ -7801,7 +7837,7 @@ async fn admit_and_queue_hints(
 fn queue_admitted_hints(
     source_peer: &PeerId,
     admitted: admission::AdmissionResult,
-    storage: &LmdbStorage,
+    storage: &ChunkStore,
     q: &mut ReplicationQueues,
 ) -> AdmissionOutcome {
     let mut discovered = HashSet::new();
@@ -8622,7 +8658,7 @@ enum FetchResult {
     /// queue is deep enough for that window to be real.
     ///
     /// This check must also precede the capacity pre-check below, because
-    /// `LmdbStorage::put` tests `exists` *before* it tests disk space: without
+    /// `ChunkStore::put` tests `exists` *before* it tests disk space: without
     /// it, a full node would decline a key it already holds, which `put` would
     /// have accepted as a duplicate.
     AlreadyHeld,
@@ -8746,7 +8782,7 @@ async fn is_storage_admitted(
 /// topology churn before the key is ever dequeued.
 async fn execute_single_fetch(
     p2p_node: Arc<P2PNode>,
-    storage: Arc<LmdbStorage>,
+    storage: Arc<ChunkStore>,
     config: Arc<ReplicationConfig>,
     key: XorName,
     source: PeerId,
@@ -8765,7 +8801,7 @@ async fn execute_single_fetch(
 
     // Possession, then capacity — both before the dial, and in that order.
     //
-    // `LmdbStorage::put` tests `exists` before it tests disk space, so a full
+    // `ChunkStore::put` tests `exists` before it tests disk space, so a full
     // node still accepts a key it already holds. Checking possession first is
     // what keeps this pair of gates from declining work `put` would have
     // taken.
@@ -8935,7 +8971,7 @@ async fn execute_single_fetch(
                     if let Err(e) = storage.put(&resp_key, &data).await {
                         // The bytes arrived and passed the content-address
                         // check, so the source did its job; the failure is
-                        // entirely local (disk-full, or an LMDB error). Any
+                        // entirely local (disk-full, or a storage error). Any
                         // valid source must serve identical content, so trying
                         // the next one cannot cure a local error — it only
                         // re-downloads the same chunk into the same store.
@@ -9071,7 +9107,8 @@ async fn handle_subtree_failed_audit(
     // Deliberately NOT routed through the release switch. This is the commitment-bound
     // subtree audit: the peer published a signed claim to hold these keys and could not
     // answer for them. That contract is enforced in every release, including the one that
-    // withholds the penalty for merely not holding a close-group chunk.
+    // withholds the penalty for merely not holding a close-group chunk, because the whole
+    // migration depends on a node's reduced commitment still meaning something.
     p2p_node
         .report_trust_event(
             challenged_peer,
@@ -9905,7 +9942,7 @@ async fn write_retention_atomic(path: &Path, bytes: Vec<u8>) -> bool {
     }
 }
 
-/// Read the current LMDB key set, build + sign a fresh
+/// Read the current key set, build + sign a fresh
 /// `StorageCommitment`, and rotate it into `state` as the new `current`.
 /// The prior `current` is demoted to `previous`; the prior `previous` is
 /// dropped (per `ResponderCommitmentState::rotate`).
@@ -9918,12 +9955,13 @@ async fn write_retention_atomic(path: &Path, bytes: Vec<u8>) -> bool {
 /// rotate. The auditor side handles "no commitment for this peer" by
 /// falling back to the legacy plain-digest audit path.
 async fn rebuild_and_rotate_commitment(
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     identity: &Arc<NodeIdentity>,
     state: &Arc<ResponderCommitmentState>,
     p2p: &Arc<P2PNode>,
     config: &Arc<ReplicationConfig>,
 ) -> Result<()> {
+    // Not `all_keys()`. While the node is bridging off the legacy store these are the
     let stored_keys = storage
         .all_keys()
         .await
@@ -10105,15 +10143,14 @@ mod tests {
     /// to a response is what the classification above rests on.
     ///
     /// A key the peer does not hold reads as `Ok(None)`. A read that fails, whether from
-    /// an I/O fault or a failed integrity check, reads as `Err`. Nothing in the migration
-    /// turns the first into the second.
+    /// an I/O fault or a failed integrity check, reads as `Err`. Nothing turns the first
+    /// into the second.
     #[tokio::test]
     async fn a_missing_key_reads_as_a_plain_miss_and_a_failed_read_as_a_fault() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let storage = LmdbStorage::new(crate::storage::LmdbStorageConfig {
+        let storage = crate::storage::ChunkStore::new(crate::storage::ChunkStoreConfig {
             root_dir: dir.path().to_path_buf(),
             verify_on_read: true,
-            max_map_size: 0,
             disk_reserve: 0,
         })
         .await

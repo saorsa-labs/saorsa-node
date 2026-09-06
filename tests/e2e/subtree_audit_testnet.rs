@@ -3,7 +3,7 @@
 //!
 //! These spin a real multi-node testnet and drive the SHIPPED audit over the
 //! live wire (real `handle_subtree_challenge` responder + `run_subtree_audit`
-//! auditor + real LMDB storage), via the test-only `audit_peer_now` /
+//! auditor + a real chunk store), via the test-only `audit_peer_now` /
 //! `rebuild_commitment_now` engine hooks. They prove the two outcomes that
 //! matter for a testnet:
 //!

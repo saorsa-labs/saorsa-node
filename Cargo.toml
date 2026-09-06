@@ -53,7 +53,8 @@ xor_name = "5"
 lru = "0.16.3"
 parking_lot = "0.12"  # Efficient mutex for cache
 
-# Storage - LMDB via heed for content-addressed chunk store
+# LMDB via heed for the paid-key list. The chunk store is one file per chunk and does
+# not use it.
 heed = "0.22"
 
 blake3 = "1"
@@ -106,8 +107,6 @@ sha2 = "0.10"
 # Cross-platform file locking for upgrade caches
 fs2 = "0.4"
 
-# System page size (for LMDB map alignment during resize)
-page_size = "0.6"
 
 # Protocol serialization
 postcard = { version = "1.1.3", features = ["use-std"] }
@@ -129,6 +128,20 @@ proptest = "1"
 alloy = { version = "1", features = ["node-bindings"] }
 serial_test = "3"
 
+# Startup scan time, index memory and inode cost at scale. Regression gates, not
+# benchmarks; ANT_SCALE_KEYS raises the count for a deliberate larger run.
+[[test]]
+name = "storage_scale"
+path = "tests/storage_scale.rs"
+required-features = ["test-utils"]
+
+# A process killed part-way through a write: the store is whole or absent, never
+# half-indexed, and what the interrupted write left behind is swept.
+[[test]]
+name = "chunk_store_crash_safety"
+path = "tests/chunk_store_crash_safety.rs"
+required-features = ["test-utils"]
+
 # E2E test infrastructure (run with --features test-utils)
 [[test]]
 name = "e2e"
@@ -145,7 +158,7 @@ path = "tests/poc_commitment_audit_attacks.rs"
 required-features = ["test-utils"]
 
 # Live responder-handler tests for the v12 audit. Use
-# LmdbStorageConfig::test_default(), gated on test-utils.
+# ChunkStoreConfig::test_default(), gated on test-utils.
 [[test]]
 name = "poc_audit_handler_live"
 path = "tests/poc_audit_handler_live.rs"
@@ -164,14 +177,6 @@ required-features = ["test-utils"]
 [[test]]
 name = "poc_price_floor_live"
 path = "tests/poc_price_floor_live.rs"
-required-features = ["test-utils"]
-
-# Shutdown/LMDB-drain regression: `ReplicationEngine::shutdown()` must not
-# return while a detached LMDB blocking op is still running. Uses the
-# test-only storage put gate, so it requires the test-utils feature.
-[[test]]
-name = "poc_shutdown_lmdb_drain"
-path = "tests/poc_shutdown_lmdb_drain.rs"
 required-features = ["test-utils"]
 
 [features]

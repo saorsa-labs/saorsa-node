@@ -21,7 +21,7 @@ use crate::replication::protocol::{
 use crate::replication::types::{
     AuditFailureReason, AuditFailureSummary, FailureEvidence, PeerSyncRecord, RepairProofs,
 };
-use crate::storage::LmdbStorage;
+use crate::storage::ChunkStore;
 use saorsa_core::identity::PeerId;
 use saorsa_core::P2PNode;
 use tokio::sync::RwLock;
@@ -34,7 +34,7 @@ use crate::replication::config::REPAIR_HINT_MIN_AGE;
 #[cfg(test)]
 use crate::replication::types::{BootstrapClaimObservation, NeighborSyncState};
 #[cfg(test)]
-use crate::storage::LmdbStorageConfig;
+use crate::storage::ChunkStoreConfig;
 #[cfg(test)]
 use tempfile::TempDir;
 
@@ -113,7 +113,7 @@ pub(crate) fn responsible_audit_response_timeout(
 )]
 pub async fn audit_tick_with_repair_proofs(
     p2p_node: &Arc<P2PNode>,
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     config: &ReplicationConfig,
     sync_history: &HashMap<PeerId, PeerSyncRecord>,
     repair_proofs: &Arc<RwLock<RepairProofs>>,
@@ -543,7 +543,7 @@ async fn verify_digests(
     nonce: &[u8; 32],
     keys: &[XorName],
     digests: &[[u8; 32]],
-    storage: &Arc<LmdbStorage>,
+    storage: &Arc<ChunkStore>,
     p2p_node: &Arc<P2PNode>,
     config: &ReplicationConfig,
 ) -> AuditTickResult {
@@ -759,7 +759,7 @@ async fn handle_audit_timeout(
 /// attack where a malicious challenger forges digests for a different peer.
 pub async fn handle_audit_challenge(
     challenge: &AuditChallenge,
-    storage: &LmdbStorage,
+    storage: &ChunkStore,
     self_peer_id: &PeerId,
     is_bootstrapping: bool,
     stored_chunks: usize,
@@ -890,16 +890,15 @@ mod tests {
         );
     }
 
-    /// Create a test `LmdbStorage` backed by a temp directory.
-    async fn create_test_storage() -> (LmdbStorage, TempDir) {
+    /// Create a test `ChunkStore` backed by a temp directory.
+    async fn create_test_storage() -> (ChunkStore, TempDir) {
         let temp_dir = TempDir::new().expect("create temp dir");
-        let config = LmdbStorageConfig {
+        let config = ChunkStoreConfig {
             root_dir: temp_dir.path().to_path_buf(),
             verify_on_read: false,
-            max_map_size: 0,
             disk_reserve: 0,
         };
-        let storage = LmdbStorage::new(config).await.expect("create storage");
+        let storage = ChunkStore::new(config).await.expect("create storage");
         (storage, temp_dir)
     }
 
@@ -931,11 +930,11 @@ mod tests {
 
         // Store two chunks.
         let content_a = b"chunk alpha";
-        let addr_a = LmdbStorage::compute_address(content_a);
+        let addr_a = ChunkStore::compute_address(content_a);
         storage.put(&addr_a, content_a).await.expect("put a");
 
         let content_b = b"chunk beta";
-        let addr_b = LmdbStorage::compute_address(content_b);
+        let addr_b = ChunkStore::compute_address(content_b);
         storage.put(&addr_b, content_b).await.expect("put b");
 
         let nonce = [0xAA; 32];
@@ -1011,7 +1010,7 @@ mod tests {
         let (storage, _temp) = create_test_storage().await;
 
         let content = b"present chunk";
-        let addr_present = LmdbStorage::compute_address(content);
+        let addr_present = ChunkStore::compute_address(content);
         storage.put(&addr_present, content).await.expect("put");
 
         let addr_absent = [0xDE; 32];
@@ -1199,7 +1198,7 @@ mod tests {
         let (storage, _temp) = create_test_storage().await;
 
         let content = b"stored but bootstrapping";
-        let addr = LmdbStorage::compute_address(content);
+        let addr = ChunkStore::compute_address(content);
         storage.put(&addr, content).await.expect("put");
 
         let challenge = make_challenge(200, [0xCC; 32], [0xDD; 32], vec![addr]);
@@ -1230,11 +1229,11 @@ mod tests {
 
         // Store K1 and K2, but NOT K3
         let content_k1 = b"key one data";
-        let addr_k1 = LmdbStorage::compute_address(content_k1);
+        let addr_k1 = ChunkStore::compute_address(content_k1);
         storage.put(&addr_k1, content_k1).await.unwrap();
 
         let content_k2 = b"key two data";
-        let addr_k2 = LmdbStorage::compute_address(content_k2);
+        let addr_k2 = ChunkStore::compute_address(content_k2);
         storage.put(&addr_k2, content_k2).await.unwrap();
 
         let addr_k3 = [0xFF; 32]; // Not stored
@@ -1283,9 +1282,9 @@ mod tests {
         let c1 = b"chunk alpha";
         let c2 = b"chunk beta";
         let c3 = b"chunk gamma";
-        let a1 = LmdbStorage::compute_address(c1);
-        let a2 = LmdbStorage::compute_address(c2);
-        let a3 = LmdbStorage::compute_address(c3);
+        let a1 = ChunkStore::compute_address(c1);
+        let a2 = ChunkStore::compute_address(c2);
+        let a3 = ChunkStore::compute_address(c3);
         storage.put(&a1, c1).await.unwrap();
         storage.put(&a2, c2).await.unwrap();
         storage.put(&a3, c3).await.unwrap();
@@ -1337,8 +1336,8 @@ mod tests {
         // Store K1 and K2 on the challenger (for expected digest computation).
         let c1 = b"scenario 55 key one";
         let c2 = b"scenario 55 key two";
-        let k1 = LmdbStorage::compute_address(c1);
-        let k2 = LmdbStorage::compute_address(c2);
+        let k1 = ChunkStore::compute_address(c1);
+        let k2 = ChunkStore::compute_address(c2);
         storage.put(&k1, c1).await.expect("put k1");
         storage.put(&k2, c2).await.expect("put k2");
 
@@ -1622,7 +1621,7 @@ mod tests {
 
         // Store a single chunk
         let content = b"single chunk";
-        let addr = LmdbStorage::compute_address(content);
+        let addr = ChunkStore::compute_address(content);
         storage.put(&addr, content).await.unwrap();
 
         // Challenge with 1 stored + 4 absent = 5 keys total
@@ -1682,7 +1681,7 @@ mod tests {
 
         // Store data so there *would* be work to audit.
         let content = b"should not be audited during bootstrap";
-        let addr = LmdbStorage::compute_address(content);
+        let addr = ChunkStore::compute_address(content);
         storage.put(&addr, content).await.expect("put");
 
         let challenge = make_challenge(2900, [0x29; 32], [0x29; 32], vec![addr]);
@@ -1773,7 +1772,7 @@ mod tests {
         let mut addrs = Vec::new();
         for i in 0u8..5 {
             let content = format!("dynamic challenge key {i}");
-            let addr = LmdbStorage::compute_address(content.as_bytes());
+            let addr = ChunkStore::compute_address(content.as_bytes());
             storage.put(&addr, content.as_bytes()).await.expect("put");
             addrs.push(addr);
         }
@@ -1830,7 +1829,7 @@ mod tests {
 
         // Store data so there is an auditable key.
         let content = b"bootstrap grace test";
-        let addr = LmdbStorage::compute_address(content);
+        let addr = ChunkStore::compute_address(content);
         storage.put(&addr, content).await.expect("put");
 
         let challenge = make_challenge(4700, [0x47; 32], [0x47; 32], vec![addr]);
@@ -1894,9 +1893,9 @@ mod tests {
         let c1 = b"scenario 53 key one";
         let c2 = b"scenario 53 key two";
         let c3 = b"scenario 53 key three";
-        let k1 = LmdbStorage::compute_address(c1);
-        let k2 = LmdbStorage::compute_address(c2);
-        let k3 = LmdbStorage::compute_address(c3);
+        let k1 = ChunkStore::compute_address(c1);
+        let k2 = ChunkStore::compute_address(c2);
+        let k3 = ChunkStore::compute_address(c3);
         storage.put(&k1, c1).await.expect("put k1");
         storage.put(&k2, c2).await.expect("put k2");
         storage.put(&k3, c3).await.expect("put k3");

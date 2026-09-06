@@ -1,7 +1,7 @@
 //! ANT protocol handler for autonomi protocol messages.
 //!
 //! This handler processes chunk PUT/GET requests with optional payment verification,
-//! storing chunks to LMDB and using the DHT for network-wide retrieval.
+//! storing chunks on disk and using the DHT for network-wide retrieval.
 //!
 //! # Architecture
 //!
@@ -18,7 +18,7 @@
 //! │   ChunkQuoteRequest           ChunkPutRequest    ChunkGetRequest
 //! │         │                         │                 │  │
 //! │         ▼                         ▼                 ▼  │
-//! │   QuoteGenerator          PaymentVerifier    LmdbStorage│
+//! │   QuoteGenerator          PaymentVerifier    ChunkStore│
 //! │         │                         │                 │  │
 //! │         └─────────────────────────┴─────────────────┘  │
 //! │                           │                             │
@@ -41,7 +41,7 @@ use crate::payment::{PaymentVerifier, QuoteGenerator, VerificationContext};
 use crate::replication::admission;
 use crate::replication::config::K_BUCKET_SIZE;
 use crate::replication::fresh::FreshWriteEvent;
-use crate::storage::lmdb::LmdbStorage;
+use crate::storage::ChunkStore;
 use bytes::Bytes;
 use parking_lot::RwLock;
 use saorsa_core::P2PNode;
@@ -210,11 +210,11 @@ impl Drop for GetRequestTelemetry {
 
 /// ANT protocol handler.
 ///
-/// Handles chunk PUT/GET/Quote requests using LMDB storage for persistence
+/// Handles chunk PUT/GET/Quote requests, persisting each chunk as its own file
 /// and optional payment verification.
 pub struct AntProtocol {
-    /// LMDB storage for chunk persistence.
-    storage: Arc<LmdbStorage>,
+    /// The chunk store.
+    storage: Arc<ChunkStore>,
     /// Payment verifier for checking payments.
     payment_verifier: Arc<PaymentVerifier>,
     /// Quote generator for creating storage quotes.
@@ -233,12 +233,12 @@ impl AntProtocol {
     ///
     /// # Arguments
     ///
-    /// * `storage` - LMDB storage for chunk persistence
+    /// * `storage` - the chunk store
     /// * `payment_verifier` - Payment verifier for validating payments
     /// * `quote_generator` - Quote generator for creating storage quotes
     #[must_use]
     pub fn new(
-        storage: Arc<LmdbStorage>,
+        storage: Arc<ChunkStore>,
         payment_verifier: Arc<PaymentVerifier>,
         quote_generator: Arc<QuoteGenerator>,
     ) -> Self {
@@ -291,9 +291,9 @@ impl AntProtocol {
         CHUNK_PROTOCOL_ID
     }
 
-    /// Get a reference to the underlying LMDB storage.
+    /// Get a reference to the underlying chunk store.
     #[must_use]
-    pub fn storage(&self) -> Arc<LmdbStorage> {
+    pub fn storage(&self) -> Arc<ChunkStore> {
         Arc::clone(&self.storage)
     }
 
@@ -520,17 +520,20 @@ impl AntProtocol {
         }
 
         // 3. Check if already exists (idempotent success)
-        match self.storage.exists(&address) {
-            Ok(true) => {
-                debug!("Chunk {addr_hex} already exists");
-                return ChunkPutResponse::AlreadyExists { address };
-            }
-            Err(e) => {
-                return ChunkPutResponse::Error(ProtocolError::Internal(format!(
-                    "Storage read failed: {e}"
-                )));
-            }
-            Ok(false) => {}
+        //
+        // Verified against the offered bytes, not answered from the name. A name can
+        // outlive the bytes under it, and acknowledging a good copy of a chunk this node
+        // holds only a damaged version of throws that copy away and does not get offered
+        // another. Reached only when this node already has the chunk, and the content
+        // address was checked in step 2, so a damaged copy is repaired from these bytes
+        // rather than the offer being refused.
+        if self
+            .storage
+            .holds_verified(&address, &request.content)
+            .await
+        {
+            debug!("Chunk {addr_hex} already exists");
+            return ChunkPutResponse::AlreadyExists { address };
         }
 
         // 4. Cheap disk-space pre-check — runs BEFORE the expensive payment
@@ -679,13 +682,13 @@ impl AntProtocol {
     /// actually holds.
     ///
     /// The quote price is driven by `QuoteGenerator::records_stored()`. Reading
-    /// the live LMDB entry count (an O(1) B-tree page-header read) right before
+    /// the live chunk count right before
     /// pricing makes the metric deletion-aware: any chunk removed by
-    /// [`LmdbStorage::delete`] or by the replication prune pass is reflected
+    /// [`ChunkStore::delete`] or by the replication prune pass is reflected
     /// immediately, with no risk of missing a delete path.
     ///
     /// On a storage read error — or a count that does not fit `usize` — the
-    /// previous metric value is left untouched so a transient LMDB error never
+    /// previous metric value is left untouched so a transient read error never
     /// disrupts quote generation.
     fn resync_quote_metric(&self) {
         match self.storage.current_chunks() {
@@ -895,7 +898,7 @@ mod tests {
     use super::*;
     use crate::payment::metrics::QuotingMetricsTracker;
     use crate::payment::{EvmVerifierConfig, PaymentVerifierConfig};
-    use crate::storage::LmdbStorageConfig;
+    use crate::storage::ChunkStoreConfig;
     use evmlib::RewardsAddress;
     use saorsa_core::identity::NodeIdentity;
     use saorsa_core::MlDsa65;
@@ -916,13 +919,13 @@ mod tests {
     async fn create_test_protocol_with_reserve(disk_reserve: u64) -> (AntProtocol, TempDir) {
         let temp_dir = TempDir::new().expect("create temp dir");
 
-        let storage_config = LmdbStorageConfig {
+        let storage_config = ChunkStoreConfig {
             root_dir: temp_dir.path().to_path_buf(),
             disk_reserve,
-            ..LmdbStorageConfig::test_default()
+            ..ChunkStoreConfig::test_default()
         };
         let storage = Arc::new(
-            LmdbStorage::new(storage_config)
+            ChunkStore::new(storage_config)
                 .await
                 .expect("create storage"),
         );
@@ -961,7 +964,7 @@ mod tests {
         let (protocol, _temp) = create_test_protocol().await;
 
         let content = b"hello world";
-        let address = LmdbStorage::compute_address(content);
+        let address = ChunkStore::compute_address(content);
 
         // Pre-populate payment cache so EVM verification is bypassed
         protocol.payment_verifier().cache_insert(address);
@@ -1153,7 +1156,7 @@ mod tests {
 
         // Create oversized content
         let content = vec![0u8; MAX_CHUNK_SIZE + 1];
-        let address = LmdbStorage::compute_address(&content);
+        let address = ChunkStore::compute_address(&content);
 
         let put_request = ChunkPutRequest::new(address, Bytes::from(content));
         let put_msg = ChunkMessage {
@@ -1186,7 +1189,7 @@ mod tests {
     /// "Full" now means both halves of the predicate: the volume is below the
     /// reserve **and** the store has no reusable space. A freshly created store
     /// has no freed pages, so both hold and the pre-check short-circuits, as it
-    /// always did. The companion cases in `storage::lmdb::tests` cover the half
+    /// always did. The companion cases in `storage::chunk_store::tests` cover the half
     /// that changed, where pruning has left reusable pages and the node must be
     /// admitted rather than refused on `statvfs` alone.
     ///
@@ -1201,7 +1204,7 @@ mod tests {
         let (protocol, _temp) = create_test_protocol_with_reserve(u64::MAX).await;
 
         let content = b"chunk for a disk-full node";
-        let address = LmdbStorage::compute_address(content);
+        let address = ChunkStore::compute_address(content);
 
         let put_request = ChunkPutRequest::new(address, Bytes::copy_from_slice(content));
         let put_msg = ChunkMessage {
@@ -1241,7 +1244,7 @@ mod tests {
         let (protocol, _temp) = create_test_protocol().await;
 
         let content = b"duplicate content";
-        let address = LmdbStorage::compute_address(content);
+        let address = ChunkStore::compute_address(content);
 
         // Pre-populate cache so EVM verification is bypassed
         protocol.payment_verifier().cache_insert(address);
@@ -1287,7 +1290,7 @@ mod tests {
         let (protocol, _temp) = create_test_protocol().await;
 
         let content = b"local access test";
-        let address = LmdbStorage::compute_address(content);
+        let address = ChunkStore::compute_address(content);
 
         assert!(!protocol.exists(&address).expect("exists check"));
 
@@ -1307,7 +1310,7 @@ mod tests {
         let (protocol, _temp) = create_test_protocol().await;
 
         let content = b"cache test content";
-        let address = LmdbStorage::compute_address(content);
+        let address = ChunkStore::compute_address(content);
 
         // Before insert: cache should be empty
         let stats_before = protocol.payment_cache_stats();
@@ -1346,7 +1349,7 @@ mod tests {
         let (protocol, _temp) = create_test_protocol().await;
 
         let content = b"duplicate cache test";
-        let address = LmdbStorage::compute_address(content);
+        let address = ChunkStore::compute_address(content);
 
         // Pre-populate cache for first PUT
         protocol.payment_verifier().cache_insert(address);
@@ -1390,7 +1393,7 @@ mod tests {
 
         // Pre-populate cache, then store a chunk to test stats
         let content = b"stats test";
-        let address = LmdbStorage::compute_address(content);
+        let address = ChunkStore::compute_address(content);
         protocol.payment_verifier().cache_insert(address);
 
         let put_request = ChunkPutRequest::new(address, Bytes::copy_from_slice(content));
@@ -1499,7 +1502,7 @@ mod tests {
         let (protocol, _temp) = create_test_protocol().await;
 
         let content = b"already stored quote test";
-        let address = LmdbStorage::compute_address(content);
+        let address = ChunkStore::compute_address(content);
 
         // Store the chunk first
         protocol.payment_verifier().cache_insert(address);
@@ -1600,7 +1603,7 @@ mod tests {
         let contents: Vec<Vec<u8>> = (0u8..5).map(|i| vec![i; 64]).collect();
         let mut addresses = Vec::new();
         for content in &contents {
-            let addr = LmdbStorage::compute_address(content);
+            let addr = ChunkStore::compute_address(content);
             protocol.put_local(&addr, content).await.expect("put_local");
             addresses.push(addr);
         }
@@ -1635,7 +1638,7 @@ mod tests {
         let contents: Vec<Vec<u8>> = (0u8..10).map(|i| vec![i; 64]).collect();
         let mut addresses = Vec::new();
         for content in &contents {
-            let addr = LmdbStorage::compute_address(content);
+            let addr = ChunkStore::compute_address(content);
             protocol.put_local(&addr, content).await.expect("put_local");
             addresses.push(addr);
         }

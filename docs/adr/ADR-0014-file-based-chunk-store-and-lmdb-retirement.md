@@ -142,11 +142,14 @@ rebuilt at startup and then mutated in place drifted to 2,400 keys pointing at f
 
 ### Durability
 
-Write: reserve capacity, create a temp in the **destination** directory, write, flush the
-file, rename, flush the shard directory, then admit the key. The publish is an
-intra-directory rename, so it is atomic on every filesystem we support and only that one
-directory needs flushing. The final name can never appear on partial content, because the
-name is the hash. Delete: unlink, flush the shard directory, then drop the key.
+Write, on Unix: reserve capacity, create a temp in the **destination** directory, write,
+flush the file, rename, flush the shard directory, then admit the key. The publish is an
+intra-directory rename, so it is atomic on every Unix filesystem we support and only that
+one directory needs flushing. Off Unix there is no rename at all, for the reason the table
+below gives; the file is created under its final name and flushed. Either way the final
+name can never appear on partial content, because the name is the hash and a name that does
+appear over the wrong bytes is caught on read. Delete: unlink, flush the shard directory,
+then drop the key.
 
 Per platform, honestly:
 
@@ -156,13 +159,31 @@ Per platform, honestly:
 | XFS | yes | not by that sequence | yes |
 | btrfs | yes | **uncertain**, ALICE found reordering | yes |
 | APFS | yes | `sync_all` already uses `F_FULLFSYNC` on Apple targets | returns 0, effect undocumented |
-| NTFS | **not documented as atomic** | unknown | **no documented way** |
+| NTFS | **not documented as atomic** | see below | **no documented way** |
 
-On Windows a node cannot make the rename durable through the standard library at all. The
-content is content-addressed and re-replicable, so the position we take is: accept it,
-detect a missing or corrupt file on read, repair from the network, and **refuse to delete
-the legacy environment on Windows** unless an operator explicitly overrides after
-power-loss testing.
+On Windows a node cannot make the rename durable through the standard library at all. Two
+places in this design leaned on one, and neither leans on it now.
+
+Publishing a chunk off Unix does not rename: it creates the file under its final name and
+flushes it, which Microsoft documents as flushing the creation metadata with it. The
+content is content-addressed and re-replicable either way, so a file that does not survive
+is detected on read and repaired from the network.
+
+Retirement still renames the environment aside before deleting it, and that rename is not
+durable off Unix. What makes it safe is that **the mark goes inside the directory, not
+beside it**. A power loss that reverts the rename brings the directory back under its live
+name still carrying its mark, and a marked directory under the live name is never opened or
+served from: its chunks are in the file store, which is what the mark records. A loss
+before the mark leaves the directory unmarked under either name, and an unmarked directory
+is always restored and reopened. Every one of those four states has a test.
+
+So the earlier position, that Windows should refuse to delete the legacy environment until
+an operator overrode it, is not what ships. It has been replaced by a mechanism rather than
+by a policy, which is the better answer: a switch nobody turns on is a migration that never
+finishes. `ANT_MIGRATION_RETIRE_LEGACY=0` remains, per node, for an operator who wants to
+hold retirement off one machine, and the forced power-loss run below is still an open fleet
+gate on every platform including this one. What that run is now checking is directory
+creation, which has no portable flush.
 
 ### Retiring LMDB
 
@@ -210,10 +231,14 @@ Per node, in order:
    because `remove_dir_all` is not: a failure partway through leaves a directory that can
    no longer be opened as an environment, and recording completion on top of that would
    have the node claim it had finished over a half-deleted store. **This is where the disk
-   comes back.** Every gate is rechecked inside the destructive step itself, in the same
-   critical section that proves no other task holds the store, because the verification
-   pass alone can run for hours and a write whose file half failed adds a key in the
-   meantime.
+   comes back.** The gates that can change while nobody is looking are rechecked inside
+   the destructive step itself, in the same critical section that proves no other task
+   holds the store: the proof's health generation, the answerability veto, the announced
+   writes, and that every legacy-only key is in the approved set. The network gates, rank
+   and commitment delivery and possession, are rechecked immediately before that call and
+   outside the guard, so the window on those is the seconds it takes to take the guard
+   rather than the hours the verification pass can run for. Both matter, and they are not
+   the same claim.
 6. **Refetch** the shortfall through ordinary replication, with the freed space to do it in.
 
 The delete gate is the pruner's existing retention contract
@@ -276,8 +301,74 @@ immediately, because it is never unable to serve.
 
 Separately, a host-wide advisory lock serialises migrations sharing a volume, held from the
 first copy through retirement, so a node cannot release it and let eleven others start
-before it has returned a byte. The two limits answer different questions: the lock is about
-one machine's disk, the wave is about one chunk's replicas.
+before it has finished copying. It is released when the environment is unlinked and its
+directory renamed aside, not when the last byte comes back: the deletion itself runs
+detached so the node can serve while it happens, and it can take minutes on a large store.
+So the next node in the queue can begin its copy while the previous one's tombstone is
+still on the disk. That is deliberate, and it is worth stating rather than claiming a
+tighter guarantee than there is. The two limits answer different questions: the lock is
+about one machine's disk, the wave is about one chunk's replicas.
+
+Where the lock file lives is a deployment fact, and the wrong answer is silent: nodes that
+cannot see each other's lock each take one and report success. A host whose nodes do not
+share a `/tmp`, which is any host using `PrivateTmp=true`, has to be told where the lock
+lives through `ANT_MIGRATION_LOCK_DIR`. The node logs the path it locked at so this can be
+answered from a log rather than inferred from a unit file.
+
+## What the review added
+
+Five mechanisms are in the implementation that are not in the design above. Each exists
+because adversarial review found a way for the destructive step to run on a belief that
+was no longer true. They are recorded here because they are load-bearing, not incidental.
+
+**A directory that has been retired says so from the inside.** The rename that moves the
+environment aside cannot be shown to be durable off Unix, so a power loss can bring it back
+under its old name with its contents already deleted, and a node that opened that would
+fail to start. A file written inside it after the rename and before any deletion travels
+with the directory, so what it is never has to be inferred. A mark beside the environment
+was tried first and was wrong: it would have to be cancelled when a retirement is abandoned,
+cancellation can fail or be lost, and a stale one authorises deleting an environment that
+has since taken a chunk. Deletion removes the mark last, so a failed deletion never leaves a
+retired directory looking intact.
+
+**A chunk the node cannot serve is kept but not claimed.** Deleting it, or dropping it from
+the index, puts the key in neither the file store's view nor the legacy one, and what
+neither view protects is what retirement destroys. Claiming it puts the key in signed
+commitments and answers presence probes with a yes for a chunk that cannot be served, which
+the commitment-bound audit penalises. So the file stays and the answers stop. Two states,
+not one: a chunk that could not be *read* is settled by a later read, and one whose bytes
+were *proven wrong* is not, because reading them again says the same thing.
+
+**A verification proof expires.** The pre-retirement pass reads every chunk, and its result
+is reused rather than re-read on every tick, because retirement is usually deferred by a
+gate that has nothing to do with the files. A kept chunk that stops being servable in that
+window is invisible: ordinary requests are still served from the legacy copy. The store
+counts the times a chunk stops being servable, a proof records that count, and retirement
+refuses a proof the store has outrun.
+
+**A write announces itself before it starts.** The work runs on a blocking thread that
+outlives the future waiting for it, so a cancelled write can leave the environment holding a
+chunk that nothing recorded. The announcement is deliberately not part of what the node
+claims to hold: it vetoes retirement and is reconciled against the disk, but no commitment,
+quote or presence answer sees it. A delete drains both halves of any announced write for its
+key, so a publish cannot land afterwards and undo it.
+
+**The legacy environment never grows again.** Both stores sit on one disk, each measures
+the same free space, and neither knows what the other is about to spend, so a chunk written
+to both can be admitted twice against one lot of headroom and enough of them can cross the
+reserve together and fill the volume this whole exercise exists to free. From the moment it
+is adopted the environment is pinned to what it already occupies: it writes only from pages
+it already has, and the file store's accounting becomes the only claim on free disk. The
+cost is that the rollback copy is made only when the environment has room of its own, which
+on a real node it usually does, because this migration exists precisely because deleting
+millions of chunks filled the free list and returned nothing to the filesystem.
+
+The category underneath all five is the same: **a fact established at one moment being acted
+on at another.** Copying, verifying and retiring are separated by hours by design, and every
+gap between them is somewhere the store can move. The pattern that works is to make the
+belief carry its own expiry — the directory carries its mark, the proof carries the count it
+saw, the write carries its note — rather than to check again and hope the check is close
+enough to the act.
 
 ## Consequences
 
@@ -314,18 +405,22 @@ one machine's disk, the wave is about one chunk's replicas.
   path self-heals, and a `stat` per call on the node's hottest path is not worth it.
 - One inode and one directory entry per chunk. At 4 MiB per object that is 0.05% overhead
   and block rounding for a full chunk is exactly zero, but it is real.
-- Windows retirement is off by default, so Windows nodes keep both stores until we can test
-  power loss on NTFS.
+- Windows publishes chunks under their final name rather than by rename, so a crash
+  mid-write leaves a partial file that the write, read and pre-retirement paths each have
+  to detect rather than trust.
 - The paid list is still LMDB. It is a fixed 256 MiB map that contributes nothing to the
   disk problem, but it is why `heed` cannot be dropped yet.
 - **Narrowing the commitment cuts the quoted price.** Price is quadratic in the committed
   key count, so a node that has just proved it is short of disk advertises a cheaper quote
   than its close-group peers and then refuses the store on capacity. A wasted round trip
   rather than a mispayment. The fix belongs to the quote path and is a separate decision.
-- **A cancelled awaiter drops the per-key lock while its blocking write runs on.** The two
-  consequences are bounded: a pruned chunk can be re-created, which the pruner deletes
-  again, and a cancelled write can leave an orphan in the legacy store, which retirement
-  removes and whose client was never acknowledged.
+- **A cancelled awaiter drops the per-key lock while its blocking write runs on.** This was
+  accepted as bounded and is no longer accepted: review showed both consequences were worse
+  than they look. The file store now records what it is writing, per key, cleared by the
+  worker rather than the caller, and a delete waits out whatever is already writing its
+  key, so a publish cannot land afterwards and undo a prune. A write into the legacy
+  environment announces itself before it starts and is reconciled against the disk, so a
+  cancelled one cannot leave a chunk that neither view protects.
 
 ### Neutral / Operational
 
@@ -352,11 +447,73 @@ resurrect a pruned chunk; retirement is refused while any gate is unmet and remo
 environment when they are all met; the release switches never round-trip through a config
 file.
 
+For the four mechanisms above: an environment carrying no mark is kept however badly it
+reads, one carrying its own mark is removed whatever it is named, and the mark survives the
+rename it exists to outlive; a chunk that cannot be read is kept on disk, not acknowledged,
+not advertised, and answered for again once it can be read; a verification overtaken by a
+file that stopped being readable does not authorise a deletion; a write in flight is not
+claimed but does stop retirement; a delete outlasts a write nobody waited for; and a key the
+environment holds that is in neither view refuses the proof and is put back where the gates
+can see it. Each was verified by removing the fix and confirming the test fails.
+
+**Proved in CI, on every commit.** The three harnesses that touch durability run on Linux,
+macOS and Windows, and again on ext4, XFS and btrfs loopback volumes. The fourth measures
+what one file per chunk costs at scale, which is a fleet question on a fleet that is Linux,
+so it runs there:
+
+- *The disk comes back.* Free space is sampled from the filesystem three times: before
+  anything is written, at the peak where both stores hold everything, and after the
+  environment is gone. Unlinking the environment while holding it open, which makes the
+  paths disappear and keeps every block, fails it. This is the claim the whole decision
+  rests on and the one the old store could not meet.
+- *A crash loses nothing.* A child process is killed at a failpoint inside a publish, not
+  after a sleep, so the kill lands where a half-finished chunk exists. What the parent then
+  checks is that nothing is claimed that cannot be served, that a leftover is swept, and
+  that a chunk caught between the environment write and the file write is named on the
+  copier's list rather than lost between them. The same is done to a retirement: a child is
+  killed with the environment renamed aside and marked, nothing yet deleted, which is the
+  most destructive moment in the migration. The next start must finish that deletion and
+  never reopen the directory, because the node has already told the network it serves those
+  chunks from the file store. Refusing to believe the mark fails it.
+- *Nodes sharing a disk take turns.* Two drivers on one volume, driving `migration::run`
+  rather than the copier, with the lock held first by an outsider so neither can be observed
+  making progress. Held through retirement as well as through copying, which is the heavier
+  half. Removing the lock from either branch of the driver fails these.
+- *One file per chunk costs what was claimed.* 100,000 chunks, measured rather than
+  asserted: the startup scan takes about 100 ms, the index costs 52 bytes per chunk, opening
+  the store reads 125 bytes whatever the chunks contain, and `put` writes exactly one
+  directory entry per chunk. The claim underneath the scan's cost, that it reads names and
+  does not `stat` behind each one, is checked against the machine rather than against a
+  number: the same directory is walked twice in the same process, once reading names and
+  once calling `metadata` on every entry, and the scan has to land on the names-only side of
+  the two. A flat ceiling cannot settle that, because one `stat` per entry costs about three
+  times a bare walk and stays well inside any ceiling loose enough not to flake. Adding that
+  `stat` to the scan fails it.
+
+Each of these was checked by mutation: the fix removed, the test confirmed red, the fix
+restored.
+
 **Fleet gates, which cannot be closed from a workstation:**
 
 - Forced power loss on ext4, XFS, btrfs, APFS and NTFS showing old-or-new, with antivirus
-  and 8.3 generation enabled on the NTFS run. Windows retirement stays off until this passes.
-- Startup scan, RSS and inode use at 100k, 1M and 10M keys on each filesystem.
+  and 8.3 generation enabled on the NTFS run. The publish path off Unix does not rename at
+  all, precisely because a rename cannot be shown to be durable there: it creates the chunk
+  under its final name and flushes the file, which is documented to flush the creation
+  metadata with it. What that leaves unproven is directory creation, which has no portable
+  flush, so this run is what closes it. `ANT_MIGRATION_RETIRE_LEGACY=0` holds retirement off
+  a node until then, per node, without a separate build.
+
+  The loopback jobs above do **not** close this and are not offered as doing so. Killing a
+  process and reopening the same mounted filesystem keeps the kernel page cache, so the
+  bytes written before the kill are still there to be read; removing every flush from the
+  publish path would leave those jobs green. What they do cover is the rest of what a
+  filesystem decides: rename behaviour, locking, deletion, and whether the space is actually
+  returned, which btrfs in particular accounts for differently from ext4.
+- Startup scan, RSS and inode use at 1M and 10M keys, and on each filesystem. CI answers
+  100,000 keys on ext4 and prints every number it measures, so drift is visible in the log
+  before it trips a gate; `ANT_SCALE_KEYS` raises the count for a deliberate larger run on a
+  machine with the disk for it. What CI cannot answer is where the curve stops being linear,
+  which is a question about a machine holding ten million files, not about the code.
 - The first release gates on no audit-timeout regression on the quiet responsible lane and on
   disk growth
   matching prediction.

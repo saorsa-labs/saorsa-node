@@ -47,7 +47,7 @@ const UPLOAD_CHUNKS: usize = 48;
 /// one test process, so full-size chunks across every node would dominate the
 /// harness's memory. An admission slot is held per *offer* regardless of
 /// payload size, so the count above is what stresses the ceiling. The
-/// trade-off is that the receiver's LMDB write is faster than production's,
+/// trade-off is that the receiver's write is faster than production's,
 /// which is part of why this is a lower bound.
 const CHUNK_BYTES: usize = 64 * 1024;
 
